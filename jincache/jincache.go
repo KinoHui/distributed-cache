@@ -87,6 +87,7 @@ func (g *Group) load(key string) (value ByteView, err error) {
 	// each key is only fetched once (either locally or remotely)
 	// regardless of the number of concurrent callers.
 	viewi, err := g.loader.Do(key, func() (interface{}, error) {
+		// 只有在直接调用Get方法时才尝试从peer获取，避免循环转发
 		if g.peers != nil {
 			if peer, ok := g.peers.PickPeer(key); ok {
 				if value, err = g.getFromPeer(peer, key); err == nil {
@@ -131,4 +132,31 @@ func (g *Group) getLocally(key string) (ByteView, error) {
 
 func (g *Group) populateCache(key string, value ByteView) {
 	g.mainCache.add(key, value)
+}
+
+// PopulateCache 公开的缓存填充方法，用于数据迁移
+func (g *Group) PopulateCache(key string, value ByteView) {
+	g.populateCache(key, value)
+}
+
+// Name 返回组名，实现CacheGroup接口
+func (g *Group) Name() string {
+	return g.name
+}
+
+// GetRemote 专门处理来自其他节点的请求，避免循环转发
+func (g *Group) GetRemote(key string) (ByteView, error) {
+	if key == "" {
+		return ByteView{}, fmt.Errorf("key is required")
+	}
+
+	// 先检查本地缓存
+	if v, ok := g.mainCache.get(key); ok {
+		log.Println("[GeeCache] remote hit")
+		return v, nil
+	}
+
+	// 缓存未命中，从数据源获取
+	log.Println("[GeeCache] remote miss, getting from data source")
+	return g.getLocally(key)
 }

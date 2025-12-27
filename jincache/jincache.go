@@ -121,7 +121,7 @@ func (g *Group) load(key string) (value ByteView, err error) {
 	return
 }
 
-func (g *Group) getFromPeer(peer PeerGetter, key string) (ByteView, error) {
+func (g *Group) getFromPeer(peer PeerClient, key string) (ByteView, error) {
 	req := &pb.Request{
 		Group: g.name,
 		Key:   key,
@@ -175,19 +175,77 @@ func (g *Group) Remove(key string) {
 	g.mainCache.Remove(key)
 }
 
-// GetRemote 专门处理来自其他节点的请求，避免循环转发
-func (g *Group) GetRemote(key string) (ByteView, error) {
+// Set 设置缓存值，通过一致性哈希判断应该路由到哪个节点
+func (g *Group) Set(key string, value ByteView) error {
 	if key == "" {
-		return ByteView{}, fmt.Errorf("key is required")
+		return fmt.Errorf("key is required")
 	}
 
-	// 先检查本地缓存
-	if v, ok := g.mainCache.get(key); ok {
-		log.Println("[JinCache] remote hit")
-		return v, nil
+	// 先通过一致性哈希判断key应该路由到哪个节点
+	if g.peers != nil {
+		if peer, ok := g.peers.PickPeer(key); ok {
+			// key应该路由到其他节点，转发请求
+			log.Printf("[JinCache] Routing set key %s to peer", key)
+			return g.setToPeer(peer, key, value)
+		}
+		// PickPeer返回false表示key应该路由到当前节点
 	}
 
-	// 缓存未命中，从数据源获取
-	log.Println("[JinCache] remote miss, getting from data source")
-	return g.getLocally(key)
+	// key应该路由到当前节点，直接设置本地缓存
+	g.populateCache(key, value)
+	log.Println("[JinCache] set key to local cache")
+	return nil
+}
+
+// Delete 删除缓存值，通过一致性哈希判断应该路由到哪个节点
+func (g *Group) Delete(key string) error {
+	if key == "" {
+		return fmt.Errorf("key is required")
+	}
+
+	// 先通过一致性哈希判断key应该路由到哪个节点
+	if g.peers != nil {
+		if peer, ok := g.peers.PickPeer(key); ok {
+			// key应该路由到其他节点，转发请求
+			log.Printf("[JinCache] Routing delete key %s to peer", key)
+			return g.deleteFromPeer(peer, key)
+		}
+		// PickPeer返回false表示key应该路由到当前节点
+	}
+
+	// key应该路由到当前节点，直接删除本地缓存
+	g.mainCache.Remove(key)
+	log.Println("[JinCache] delete key from local cache")
+	return nil
+}
+
+// setToPeer 将设置请求转发到远程节点
+func (g *Group) setToPeer(peer PeerClient, key string, value ByteView) error {
+	req := &pb.Request{
+		Group: g.name,
+		Key:   key,
+		Value: value.ByteSlice(),
+	}
+	err := peer.Set(req)
+	if err != nil {
+		log.Printf("[JinCache] Failed to set to peer, falling back to local: %v", err)
+		// 降级到本地缓存
+		g.populateCache(key, value)
+	}
+	return err
+}
+
+// deleteFromPeer 将删除请求转发到远程节点
+func (g *Group) deleteFromPeer(peer PeerClient, key string) error {
+	req := &pb.Request{
+		Group: g.name,
+		Key:   key,
+	}
+	err := peer.Delete(req)
+	if err != nil {
+		log.Printf("[JinCache] Failed to delete from peer, falling back to local: %v", err)
+		// 降级到本地缓存
+		g.mainCache.Remove(key)
+	}
+	return err
 }

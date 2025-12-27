@@ -1,6 +1,7 @@
 package jincache
 
 import (
+	"bytes"
 	"context"
 	"distributed-cache-demo/jincache/consistenthash"
 	"distributed-cache-demo/jincache/discovery"
@@ -29,9 +30,9 @@ type HTTPPool struct {
 	// this peer's base URL, e.g. "https://example.net:8000"
 	self        string
 	basePath    string
-	mu          sync.Mutex // guards peers and httpGetters
+	mu          sync.Mutex // guards peers and httpPeerClients
 	peers       *consistenthash.Map
-	httpGetters map[string]*httpGetter // keyed by e.g. "http://10.0.0.2:8008"
+	httpPeerClients map[string]*httpPeerClient // keyed by e.g. "http://10.0.0.2:8008"
 	hashFunc    consistenthash.Hash
 
 	// 新增字段
@@ -169,7 +170,7 @@ func NewEnhancedHTTPPool(self string, discovery *discovery.ServiceDiscovery, gro
 		// 初始化空的peers，避免空指针
 		peers:       consistenthash.New(defaultReplicas, hashFunc),
 		hashFunc:    hashFunc,
-		httpGetters: make(map[string]*httpGetter),
+		httpPeerClients: make(map[string]*httpPeerClient),
 		// 容错配置
 		nodeHealth:     newNodeHealth(3, 5*time.Minute), // 3次失败后加入黑名单，5分钟后恢复
 		requestTimeout: 3 * time.Second,                 // 3秒超时
@@ -286,8 +287,13 @@ func (p *HTTPPool) handleSetRequest(w http.ResponseWriter, r *http.Request, grou
 		return
 	}
 
-	// 设置缓存值
-	group.PopulateCache(key, ByteView{b: req.Value})
+	// 调用 group.Set 方法，内部会通过一致性哈希判断应该路由到哪个节点
+	err = group.Set(key, ByteView{b: req.Value})
+	if err != nil {
+		log.Printf("[ServeHTTP] Failed to set key %s: %v", key, err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	log.Printf("[ServeHTTP] Successfully set value for key: %s", key)
 	w.WriteHeader(http.StatusOK)
@@ -297,8 +303,13 @@ func (p *HTTPPool) handleSetRequest(w http.ResponseWriter, r *http.Request, grou
 func (p *HTTPPool) handleDeleteRequest(w http.ResponseWriter, r *http.Request, group *Group, key string) {
 	log.Printf("[ServeHTTP] Processing DELETE request for key: %s", key)
 
-	// 删除缓存值
-	group.Remove(key)
+	// 调用 group.Delete 方法，内部会通过一致性哈希判断应该路由到哪个节点
+	err := group.Delete(key)
+	if err != nil {
+		log.Printf("[ServeHTTP] Failed to delete key %s: %v", key, err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	log.Printf("[ServeHTTP] Successfully deleted key: %s", key)
 	w.WriteHeader(http.StatusOK)
@@ -339,7 +350,7 @@ func (p *HTTPPool) handleStatsRequest(w http.ResponseWriter, r *http.Request, gr
 	w.Write(body)
 }
 
-type httpGetter struct {
+type httpPeerClient struct {
 	baseURL    string
 	httpClient *http.Client
 	maxRetries int
@@ -347,8 +358,8 @@ type httpGetter struct {
 	pool       *HTTPPool // 引用pool以记录节点健康状态
 }
 
-func newHTTPGetter(baseURL string, timeout time.Duration, maxRetries int) *httpGetter {
-	return &httpGetter{
+func newHTTPPeerClient(baseURL string, timeout time.Duration, maxRetries int) *httpPeerClient {
+	return &httpPeerClient{
 		baseURL: baseURL,
 		httpClient: &http.Client{
 			Timeout: timeout,
@@ -358,7 +369,7 @@ func newHTTPGetter(baseURL string, timeout time.Duration, maxRetries int) *httpG
 	}
 }
 
-func (h *httpGetter) Get(in *pb.Request, out *pb.Response) error {
+func (h *httpPeerClient) Get(in *pb.Request, out *pb.Response) error {
 	u := fmt.Sprintf(
 		"%v%v/%v",
 		h.baseURL,
@@ -373,32 +384,32 @@ func (h *httpGetter) Get(in *pb.Request, out *pb.Response) error {
 		if attempt > 0 {
 			// 指数退避
 			backoff := time.Duration(1<<uint(attempt-1)) * 100 * time.Millisecond
-			log.Printf("[httpGetter] Retry attempt %d after %v", attempt, backoff)
+			log.Printf("[httpPeerClient] Retry attempt %d after %v", attempt, backoff)
 			time.Sleep(backoff)
 		}
 
-		log.Printf("[httpGetter] Making request to: %s (attempt %d)", u, attempt+1)
+		log.Printf("[httpPeerClient] Making request to: %s (attempt %d)", u, attempt+1)
 
 		req, err := http.NewRequest("GET", u, nil)
 		if err != nil {
 			lastErr = err
-			log.Printf("[httpGetter] Failed to create request: %v", err)
+			log.Printf("[httpPeerClient] Failed to create request: %v", err)
 			continue
 		}
 
 		res, err := h.httpClient.Do(req)
 		if err != nil {
 			lastErr = err
-			log.Printf("[httpGetter] Request failed: %v", err)
+			log.Printf("[httpPeerClient] Request failed: %v", err)
 			continue
 		}
 
-		log.Printf("[httpGetter] Response status: %s", res.Status)
+		log.Printf("[httpPeerClient] Response status: %s", res.Status)
 
 		if res.StatusCode == http.StatusNotFound {
 			// 404表示key不存在，这是正常响应，不应该算作失败
 			res.Body.Close()
-			log.Printf("[httpGetter] Key not found: %s", in.GetKey())
+			log.Printf("[httpPeerClient] Key not found: %s", in.GetKey())
 			// 记录成功（404也是成功的响应）
 			if h.pool != nil {
 				nodeAddr := strings.TrimSuffix(h.baseURL, h.pool.basePath)
@@ -410,7 +421,7 @@ func (h *httpGetter) Get(in *pb.Request, out *pb.Response) error {
 		if res.StatusCode != http.StatusOK {
 			res.Body.Close()
 			lastErr = fmt.Errorf("server returned: %v", res.Status)
-			log.Printf("[httpGetter] Server error: %v", lastErr)
+			log.Printf("[httpPeerClient] Server error: %v", lastErr)
 			continue
 		}
 
@@ -418,17 +429,17 @@ func (h *httpGetter) Get(in *pb.Request, out *pb.Response) error {
 		res.Body.Close()
 		if err != nil {
 			lastErr = fmt.Errorf("reading response body: %v", err)
-			log.Printf("[httpGetter] Failed to read response: %v", lastErr)
+			log.Printf("[httpPeerClient] Failed to read response: %v", lastErr)
 			continue
 		}
 
 		if err = proto.Unmarshal(bytes, out); err != nil {
 			lastErr = fmt.Errorf("decoding response body: %v", err)
-			log.Printf("[httpGetter] Failed to decode response: %v", lastErr)
+			log.Printf("[httpPeerClient] Failed to decode response: %v", lastErr)
 			continue
 		}
 
-		log.Printf("[httpGetter] Successfully got value for key: %s", in.GetKey())
+		log.Printf("[httpPeerClient] Successfully got value for key: %s", in.GetKey())
 
 		// 记录成功
 		if h.pool != nil {
@@ -449,7 +460,139 @@ func (h *httpGetter) Get(in *pb.Request, out *pb.Response) error {
 	return lastErr
 }
 
-var _ PeerGetter = (*httpGetter)(nil)
+// Set 向远程节点设置值
+func (h *httpPeerClient) Set(in *pb.Request) error {
+	u := fmt.Sprintf(
+		"%v%v/%v",
+		h.baseURL,
+		url.QueryEscape(in.GetGroup()),
+		url.QueryEscape(in.GetKey()),
+	)
+
+	var lastErr error
+
+	// 重试机制
+	for attempt := 0; attempt <= h.maxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(1<<uint(attempt-1)) * 100 * time.Millisecond
+			log.Printf("[httpPeerClient] Set retry attempt %d after %v", attempt, backoff)
+			time.Sleep(backoff)
+		}
+
+		// 序列化请求体
+		body, err := proto.Marshal(in)
+		if err != nil {
+			lastErr = fmt.Errorf("marshaling request: %v", err)
+			continue
+		}
+
+		log.Printf("[httpPeerClient] Making SET request to: %s (attempt %d)", u, attempt+1)
+
+		req, err := http.NewRequest("PUT", u, bytes.NewReader(body))
+		if err != nil {
+			lastErr = fmt.Errorf("creating request: %v", err)
+			continue
+		}
+		req.Header.Set("Content-Type", "application/octet-stream")
+
+		res, err := h.httpClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("request failed: %v", err)
+			continue
+		}
+
+		log.Printf("[httpPeerClient] SET response status: %s", res.Status)
+
+		if res.StatusCode != http.StatusOK {
+			res.Body.Close()
+			lastErr = fmt.Errorf("server returned: %v", res.Status)
+			continue
+		}
+
+		res.Body.Close()
+		log.Printf("[httpPeerClient] Successfully set value for key: %s", in.GetKey())
+
+		// 记录成功
+		if h.pool != nil {
+			nodeAddr := strings.TrimSuffix(h.baseURL, h.pool.basePath)
+			h.pool.RecordPeerSuccess(nodeAddr)
+		}
+
+		return nil
+	}
+
+	// 所有重试都失败，记录失败
+	if h.pool != nil {
+		nodeAddr := strings.TrimSuffix(h.baseURL, h.pool.basePath)
+		h.pool.RecordPeerFailure(nodeAddr)
+	}
+
+	return lastErr
+}
+
+// Delete 从远程节点删除值
+func (h *httpPeerClient) Delete(in *pb.Request) error {
+	u := fmt.Sprintf(
+		"%v%v/%v",
+		h.baseURL,
+		url.QueryEscape(in.GetGroup()),
+		url.QueryEscape(in.GetKey()),
+	)
+
+	var lastErr error
+
+	// 重试机制
+	for attempt := 0; attempt <= h.maxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(1<<uint(attempt-1)) * 100 * time.Millisecond
+			log.Printf("[httpPeerClient] Delete retry attempt %d after %v", attempt, backoff)
+			time.Sleep(backoff)
+		}
+
+		log.Printf("[httpPeerClient] Making DELETE request to: %s (attempt %d)", u, attempt+1)
+
+		req, err := http.NewRequest("DELETE", u, nil)
+		if err != nil {
+			lastErr = fmt.Errorf("creating request: %v", err)
+			continue
+		}
+
+		res, err := h.httpClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("request failed: %v", err)
+			continue
+		}
+
+		log.Printf("[httpPeerClient] DELETE response status: %s", res.Status)
+
+		if res.StatusCode != http.StatusOK {
+			res.Body.Close()
+			lastErr = fmt.Errorf("server returned: %v", res.Status)
+			continue
+		}
+
+		res.Body.Close()
+		log.Printf("[httpPeerClient] Successfully deleted key: %s", in.GetKey())
+
+		// 记录成功
+		if h.pool != nil {
+			nodeAddr := strings.TrimSuffix(h.baseURL, h.pool.basePath)
+			h.pool.RecordPeerSuccess(nodeAddr)
+		}
+
+		return nil
+	}
+
+	// 所有重试都失败，记录失败
+	if h.pool != nil {
+		nodeAddr := strings.TrimSuffix(h.baseURL, h.pool.basePath)
+		h.pool.RecordPeerFailure(nodeAddr)
+	}
+
+	return lastErr
+}
+
+var _ PeerClient = (*httpPeerClient)(nil)
 
 // 未调用Set updates the pool's list of peers.
 func (p *HTTPPool) Set(peers ...string) {
@@ -457,14 +600,14 @@ func (p *HTTPPool) Set(peers ...string) {
 	defer p.mu.Unlock()
 	p.peers = consistenthash.New(defaultReplicas, p.hashFunc)
 	p.peers.Add(peers...)
-	p.httpGetters = make(map[string]*httpGetter, len(peers))
+	p.httpPeerClients = make(map[string]*httpPeerClient, len(peers))
 	for _, peer := range peers {
-		p.httpGetters[peer] = &httpGetter{baseURL: peer + p.basePath}
+		p.httpPeerClients[peer] = &httpPeerClient{baseURL: peer + p.basePath}
 	}
 }
 
 // PickPeer picks a peer according to key
-func (p *HTTPPool) PickPeer(key string) (PeerGetter, bool) {
+func (p *HTTPPool) PickPeer(key string) (PeerClient, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -493,7 +636,7 @@ func (p *HTTPPool) PickPeer(key string) (PeerGetter, bool) {
 		for _, node := range nodes {
 			if node != p.self && node != selectedPeer && !p.nodeHealth.isBlacklisted(node) {
 				p.Log("Picking alternative peer %s instead of blacklisted %s", node, selectedPeer)
-				if getter, exists := p.httpGetters[node]; exists {
+				if getter, exists := p.httpPeerClients[node]; exists {
 					return getter, true
 				}
 			}
@@ -505,7 +648,7 @@ func (p *HTTPPool) PickPeer(key string) (PeerGetter, bool) {
 
 	// 选择的是其他节点，返回对应的getter
 	p.Log("Pick peer %s for key %s", selectedPeer, key)
-	if getter, exists := p.httpGetters[selectedPeer]; exists {
+	if getter, exists := p.httpPeerClients[selectedPeer]; exists {
 		return getter, true
 	}
 
@@ -571,12 +714,12 @@ func (p *HTTPPool) handleNodeChange(nodes []discovery.NodeInfo) {
 		log.Printf("[HTTPPool] Updated hash ring with nodes: %v", activeAddrs)
 	}
 
-	p.httpGetters = make(map[string]*httpGetter, len(activeAddrs))
+	p.httpPeerClients = make(map[string]*httpPeerClient, len(activeAddrs))
 	for _, peer := range activeAddrs {
 		// 使用新的构造函数创建带容错功能的getter
-		getter := newHTTPGetter(peer+p.basePath, p.requestTimeout, p.maxRetries)
-		getter.pool = p // 设置pool引用以便记录节点健康状态
-		p.httpGetters[peer] = getter
+		client := newHTTPPeerClient(peer+p.basePath, p.requestTimeout, p.maxRetries)
+		client.pool = p // 设置pool引用以便记录节点健康状态
+		p.httpPeerClients[peer] = client
 		log.Printf("[HTTPPool] Created HTTP getter for peer: %s (timeout: %v, retries: %d)",
 			peer, p.requestTimeout, p.maxRetries)
 	}
@@ -708,9 +851,9 @@ func (p *HTTPPool) UpdateNodes(addrs []string) {
 	p.peers = consistenthash.New(defaultReplicas, p.hashFunc)
 	p.peers.Add(addrs...)
 
-	p.httpGetters = make(map[string]*httpGetter, len(addrs))
+	p.httpPeerClients = make(map[string]*httpPeerClient, len(addrs))
 	for _, peer := range addrs {
-		p.httpGetters[peer] = &httpGetter{baseURL: peer + p.basePath}
+		p.httpPeerClients[peer] = &httpPeerClient{baseURL: peer + p.basePath}
 	}
 }
 

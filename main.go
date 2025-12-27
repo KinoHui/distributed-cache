@@ -16,10 +16,10 @@ import (
 )
 
 var db = map[string]string{
-	"Tom":   "630",
-	"Jack":  "589",
-	"Jackk": "999",
-	"Sam":   "567",
+	"Tom":  "630",
+	"Jack": "589",
+	// "Jackk": "999",
+	"Sam": "567",
 }
 
 // Config 配置结构

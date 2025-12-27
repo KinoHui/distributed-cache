@@ -1,9 +1,9 @@
 package jincache
 
 import (
-	errors "errors"
 	pb "distributed-cache-demo/jincache/jincachepb"
 	"distributed-cache-demo/jincache/singleflight"
+	errors "errors"
 	"fmt"
 	"log"
 	"sync"
@@ -88,7 +88,16 @@ func (g *Group) Get(key string) (ByteView, error) {
 	}
 
 	// 缓存未命中，从数据源加载
-	return g.getLocally(key)
+	// each key is only fetched once from data source
+	// regardless of the number of concurrent callers.
+	viewi, err := g.loader.Do(key, func() (interface{}, error) {
+		return g.getLocally(key)
+	})
+
+	if err == nil {
+		return viewi.(ByteView), nil
+	}
+	return ByteView{}, err
 }
 
 // RegisterPeers registers a PeerPicker for choosing remote peer

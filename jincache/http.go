@@ -41,19 +41,19 @@ type HTTPPool struct {
 	stopCh     chan struct{}
 
 	// 容错相关字段
-	nodeHealth        *nodeHealth
-	requestTimeout    time.Duration
-	maxRetries        int
+	nodeHealth     *nodeHealth
+	requestTimeout time.Duration
+	maxRetries     int
 }
 
 // nodeHealth 管理节点健康状态
 type nodeHealth struct {
 	mu           sync.RWMutex
-	failures     map[string]int        // 失败次数
-	lastFailure  map[string]time.Time  // 最后失败时间
-	blacklist    map[string]time.Time  // 黑名单（节点地址 -> 加入时间）
-	maxFailures  int                   // 最大失败次数
-	blacklistTTL time.Duration         // 黑名单TTL
+	failures     map[string]int       // 失败次数
+	lastFailure  map[string]time.Time // 最后失败时间
+	blacklist    map[string]time.Time // 黑名单（节点地址 -> 加入时间）
+	maxFailures  int                  // 最大失败次数
+	blacklistTTL time.Duration        // 黑名单TTL
 }
 
 func newNodeHealth(maxFailures int, blacklistTTL time.Duration) *nodeHealth {
@@ -144,7 +144,7 @@ func (nh *nodeHealth) cleanupBlacklist() {
 	}
 }
 
-// NewHTTPPool initializes an HTTP pool of peers.
+// 未调用NewHTTPPool initializes an HTTP pool of peers.
 func NewHTTPPool(self string) *HTTPPool {
 	return &HTTPPool{
 		self:     self,
@@ -160,20 +160,20 @@ func NewEnhancedHTTPPool(self string, discovery *discovery.ServiceDiscovery, gro
 		hashFunc = hashFuncs[0]
 	}
 	pool := &HTTPPool{
-		self:            self,
-		basePath:        defaultBasePath,
-		discovery:       discovery,
-		localGroup:      group,
-		stopCh:          make(chan struct{}),
-		migrator:        migration.NewDataMigrator(&GroupAdapter{group: group}, 100, 30*time.Second),
+		self:       self,
+		basePath:   defaultBasePath,
+		discovery:  discovery,
+		localGroup: group,
+		stopCh:     make(chan struct{}),
+		migrator:   migration.NewDataMigrator(&GroupAdapter{group: group}, 100, 30*time.Second),
 		// 初始化空的peers，避免空指针
-		peers:           consistenthash.New(defaultReplicas, hashFunc),
-		hashFunc:        hashFunc,
-		httpGetters:     make(map[string]*httpGetter),
+		peers:       consistenthash.New(defaultReplicas, hashFunc),
+		hashFunc:    hashFunc,
+		httpGetters: make(map[string]*httpGetter),
 		// 容错配置
-		nodeHealth:      newNodeHealth(3, 5*time.Minute),  // 3次失败后加入黑名单，5分钟后恢复
-		requestTimeout:  3 * time.Second,                   // 3秒超时
-		maxRetries:      2,                                  // 最多重试2次
+		nodeHealth:     newNodeHealth(3, 5*time.Minute), // 3次失败后加入黑名单，5分钟后恢复
+		requestTimeout: 3 * time.Second,                 // 3秒超时
+		maxRetries:     2,                               // 最多重试2次
 	}
 
 	// 启动节点监听
@@ -241,9 +241,9 @@ func (p *HTTPPool) handleGetRequest(w http.ResponseWriter, r *http.Request, grou
 	// 对于来自其他节点的请求，使用GetRemote方法避免循环转发
 	log.Printf("[ServeHTTP] Remote GET request, using Group.GetRemote")
 
-	view, err := group.GetRemote(key)
+	view, err := group.Get(key)
 	if err != nil {
-		log.Printf("[ServeHTTP] Failed to get key %s remotely: %v", key, err)
+		log.Printf("[ServeHTTP] Failed to get key %s: %v", key, err)
 		// 判断是否是key不存在的错误
 		if err == KeyNotFoundError {
 			http.Error(w, "key not found: "+key, http.StatusNotFound)
@@ -340,11 +340,11 @@ func (p *HTTPPool) handleStatsRequest(w http.ResponseWriter, r *http.Request, gr
 }
 
 type httpGetter struct {
-	baseURL     string
-	httpClient  *http.Client
-	maxRetries  int
-	timeout     time.Duration
-	pool        *HTTPPool // 引用pool以记录节点健康状态
+	baseURL    string
+	httpClient *http.Client
+	maxRetries int
+	timeout    time.Duration
+	pool       *HTTPPool // 引用pool以记录节点健康状态
 }
 
 func newHTTPGetter(baseURL string, timeout time.Duration, maxRetries int) *httpGetter {
@@ -448,9 +448,10 @@ func (h *httpGetter) Get(in *pb.Request, out *pb.Response) error {
 
 	return lastErr
 }
+
 var _ PeerGetter = (*httpGetter)(nil)
 
-// Set updates the pool's list of peers.
+// 未调用Set updates the pool's list of peers.
 func (p *HTTPPool) Set(peers ...string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -699,7 +700,7 @@ func (p *HTTPPool) RecordPeerSuccess(peerAddr string) {
 	p.nodeHealth.recordSuccess(peerAddr)
 }
 
-// UpdateNodes 手动更新节点列表
+// 未调用UpdateNodes 手动更新节点列表
 func (p *HTTPPool) UpdateNodes(addrs []string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -713,7 +714,7 @@ func (p *HTTPPool) UpdateNodes(addrs []string) {
 	}
 }
 
-// GetHealthyNodes 获取健康节点列表
+// 未调用GetHealthyNodes 获取健康节点列表
 func (p *HTTPPool) GetHealthyNodes() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()

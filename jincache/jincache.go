@@ -67,12 +67,24 @@ func (g *Group) Get(key string) (ByteView, error) {
 		return ByteView{}, fmt.Errorf("key is required")
 	}
 
+	// 先通过一致性哈希判断key应该路由到哪个节点
+	if g.peers != nil {
+		if peer, ok := g.peers.PickPeer(key); ok {
+			// key应该路由到其他节点，转发请求
+			log.Printf("[GeeCache] Routing key %s to peer", key)
+			return g.getFromPeer(peer, key)
+		}
+		// PickPeer返回false表示key应该路由到当前节点
+	}
+
+	// key应该路由到当前节点，查本地缓存
 	if v, ok := g.mainCache.get(key); ok {
 		log.Println("[GeeCache] hit")
 		return v, nil
 	}
 
-	return g.load(key)
+	// 缓存未命中，从数据源加载
+	return g.getLocally(key)
 }
 
 // RegisterPeers registers a PeerPicker for choosing remote peer
@@ -84,19 +96,9 @@ func (g *Group) RegisterPeers(peers PeerPicker) {
 }
 
 func (g *Group) load(key string) (value ByteView, err error) {
-	// each key is only fetched once (either locally or remotely)
+	// each key is only fetched once from data source
 	// regardless of the number of concurrent callers.
 	viewi, err := g.loader.Do(key, func() (interface{}, error) {
-		// 只有在直接调用Get方法时才尝试从peer获取，避免循环转发
-		if g.peers != nil {
-			if peer, ok := g.peers.PickPeer(key); ok {
-				if value, err = g.getFromPeer(peer, key); err == nil {
-					return value, nil
-				}
-				log.Println("[GeeCache] Failed to get from peer", err)
-			}
-		}
-
 		return g.getLocally(key)
 	})
 
@@ -142,6 +144,16 @@ func (g *Group) PopulateCache(key string, value ByteView) {
 // Name 返回组名，实现CacheGroup接口
 func (g *Group) Name() string {
 	return g.name
+}
+
+// GetKeys 返回缓存中的所有key，用于数据迁移
+func (g *Group) GetKeys() []string {
+	return g.mainCache.Keys()
+}
+
+// Remove 从缓存中删除一个key，用于数据迁移
+func (g *Group) Remove(key string) {
+	g.mainCache.Remove(key)
 }
 
 // GetRemote 专门处理来自其他节点的请求，避免循环转发

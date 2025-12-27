@@ -78,3 +78,25 @@ func (c *Cache) Add(key string, value Value) {
 func (c *Cache) Len() int {
 	return c.ll.Len()
 }
+
+// Keys returns all keys in the cache
+func (c *Cache) Keys() []string {
+	keys := make([]string, 0, c.ll.Len())
+	for key := range c.cache {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+// Remove removes a key from the cache
+func (c *Cache) Remove(key string) {
+	if ele, ok := c.cache[key]; ok {
+		c.ll.Remove(ele)
+		kv := ele.Value.(*entry)
+		delete(c.cache, kv.key)
+		c.nbytes -= int64(len(kv.key)) + int64(kv.value.Len())
+		if c.OnEvicted != nil {
+			c.OnEvicted(kv.key, kv.value)
+		}
+	}
+}

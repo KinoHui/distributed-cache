@@ -34,3 +34,22 @@ func (c *cache) get(key string) (value ByteView, ok bool) {
 
 	return
 }
+
+// Keys returns all keys in the cache
+func (c *cache) Keys() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.lru == nil {
+		return []string{}
+	}
+	return c.lru.Keys()
+}
+
+// Remove removes a key from the cache
+func (c *cache) Remove(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.lru != nil {
+		c.lru.Remove(key)
+	}
+}

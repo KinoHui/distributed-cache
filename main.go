@@ -54,6 +54,16 @@ func startCacheServer(config *Config, jin *jincache.Group) {
 	}
 
 	// 创建增强的HTTP池
+	// hashFunc := func(data []byte) uint32 {
+	// 	fmt.Println("######node name: " + string(data))
+	// 	if len(data) > 1 {
+	// 		fmt.Println("######hashed result: ", uint32(data[1]))
+	// 		return uint32(data[1])
+	// 	} else {
+	// 		fmt.Println("######hashed result: ", uint32(data[0]))
+	// 		return uint32(data[0])
+	// 	}
+	// }
 	peers := jincache.NewEnhancedHTTPPool(nodeAddr, sd, jin)
 	jin.RegisterPeers(peers)
 
@@ -108,10 +118,10 @@ func handleGracefulShutdown(sd *discovery.ServiceDiscovery, peers *jincache.HTTP
 
 func parseConfig() *Config {
 	config := &Config{}
-	
+
 	flag.IntVar(&config.Port, "port", 8001, "jincache server port")
 	flag.BoolVar(&config.API, "api", false, "Start a api server?")
-	
+
 	// 解析etcd端点
 	var etcdEndpoints string
 	flag.StringVar(&etcdEndpoints, "etcd", "192.168.59.132:2379", "etcd endpoints (comma separated)")
@@ -125,7 +135,7 @@ func parseConfig() *Config {
 	}
 
 	config.APIAddr = "http://localhost:9999"
-	
+
 	return config
 }
 

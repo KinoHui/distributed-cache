@@ -4,8 +4,8 @@ import (
 	"context"
 	"distributed-cache-demo/jincache/consistenthash"
 	"distributed-cache-demo/jincache/discovery"
-	"distributed-cache-demo/jincache/migration"
 	pb "distributed-cache-demo/jincache/jincachepb"
+	"distributed-cache-demo/jincache/migration"
 	"fmt"
 	"io"
 	"log"
@@ -31,7 +31,8 @@ type HTTPPool struct {
 	mu          sync.Mutex // guards peers and httpGetters
 	peers       *consistenthash.Map
 	httpGetters map[string]*httpGetter // keyed by e.g. "http://10.0.0.2:8008"
-	
+	hashFunc    consistenthash.Hash
+
 	// 新增字段
 	discovery  *discovery.ServiceDiscovery
 	migrator   *migration.DataMigrator
@@ -49,7 +50,11 @@ func NewHTTPPool(self string) *HTTPPool {
 }
 
 // NewEnhancedHTTPPool creates an enhanced HTTP pool with service discovery
-func NewEnhancedHTTPPool(self string, discovery *discovery.ServiceDiscovery, group *Group) *HTTPPool {
+func NewEnhancedHTTPPool(self string, discovery *discovery.ServiceDiscovery, group *Group, hashFuncs ...consistenthash.Hash) *HTTPPool {
+	var hashFunc consistenthash.Hash
+	if len(hashFuncs) > 0 {
+		hashFunc = hashFuncs[0]
+	}
 	pool := &HTTPPool{
 		self:       self,
 		basePath:   defaultBasePath,
@@ -58,13 +63,14 @@ func NewEnhancedHTTPPool(self string, discovery *discovery.ServiceDiscovery, gro
 		stopCh:     make(chan struct{}),
 		migrator:   migration.NewDataMigrator(&GroupAdapter{group: group}, 100, 30*time.Second),
 		// 初始化空的peers，避免空指针
-		peers:      consistenthash.New(defaultReplicas, nil),
+		peers:       consistenthash.New(defaultReplicas, hashFunc),
+		hashFunc:    hashFunc,
 		httpGetters: make(map[string]*httpGetter),
 	}
-	
+
 	// 启动节点监听
 	go pool.watchNodes()
-	
+
 	return pool
 }
 
@@ -101,7 +107,7 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 对于来自其他节点的请求，使用GetRemote方法避免循环转发
 	log.Printf("[ServeHTTP] Remote request, using Group.GetRemote")
-	
+
 	// 使用GetRemote方法，它会检查缓存但不会转发给其他节点
 	view, err := group.GetRemote(key)
 	if err != nil {
@@ -133,9 +139,9 @@ func (h *httpGetter) Get(in *pb.Request, out *pb.Response) error {
 		url.QueryEscape(in.GetGroup()),
 		url.QueryEscape(in.GetKey()),
 	)
-	
+
 	log.Printf("[httpGetter] Making request to: %s", u)
-	
+
 	res, err := http.Get(u)
 	if err != nil {
 		log.Printf("[httpGetter] Request failed: %v", err)
@@ -168,7 +174,7 @@ var _ PeerGetter = (*httpGetter)(nil)
 func (p *HTTPPool) Set(peers ...string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.peers = consistenthash.New(defaultReplicas, nil)
+	p.peers = consistenthash.New(defaultReplicas, p.hashFunc)
 	p.peers.Add(peers...)
 	p.httpGetters = make(map[string]*httpGetter, len(peers))
 	for _, peer := range peers {
@@ -180,40 +186,30 @@ func (p *HTTPPool) Set(peers ...string) {
 func (p *HTTPPool) PickPeer(key string) (PeerGetter, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	
+
 	// 检查peers是否为空
 	if p.peers == nil || p.peers.IsEmpty() {
 		return nil, false
 	}
-	
-	// 如果只有一个节点（自己），不选择peer
-	nodes := p.peers.GetNodes()
-	if len(nodes) <= 1 {
-		return nil, false
-	}
-	
+
 	// 获取一致性哈希选择的节点
 	selectedPeer := p.peers.Get(key)
-	
-	// 如果选择的是自己，尝试选择下一个节点
+	if selectedPeer == "" {
+		return nil, false
+	}
+
+	// 如果选择的是当前节点，返回false表示不需要转发
 	if selectedPeer == p.self {
-		// 简单处理：选择列表中的第一个其他节点
-		for _, node := range nodes {
-			if node != p.self {
-				selectedPeer = node
-				break
-			}
-		}
+		p.Log("Key %s routes to self", key)
+		return nil, false
 	}
-	
-	// 如果最终选择的不是自己，且有对应的getter
-	if selectedPeer != "" && selectedPeer != p.self {
-		p.Log("Pick peer %s", selectedPeer)
-		if getter, exists := p.httpGetters[selectedPeer]; exists {
-			return getter, true
-		}
+
+	// 选择的是其他节点，返回对应的getter
+	p.Log("Pick peer %s for key %s", selectedPeer, key)
+	if getter, exists := p.httpGetters[selectedPeer]; exists {
+		return getter, true
 	}
-	
+
 	return nil, false
 }
 
@@ -224,7 +220,7 @@ func (p *HTTPPool) watchNodes() {
 	}
 
 	nodesCh := p.discovery.WatchNodes()
-	
+
 	for {
 		select {
 		case <-p.stopCh:
@@ -262,28 +258,30 @@ func (p *HTTPPool) handleNodeChange(nodes []discovery.NodeInfo) {
 		return
 	}
 
-	log.Printf("[HTTPPool] Node list changed, updating. Current: %v, New: %v", 
+	log.Printf("[HTTPPool] Node list changed, updating. Current: %v, New: %v",
 		currentAddrs, activeAddrs)
 	log.Printf("[HTTPPool] Self node: %s", p.self)
 
+	// 保存旧的哈希环用于迁移
+	oldPeers := p.peers
+
 	// 更新节点列表
-	p.peers = consistenthash.New(defaultReplicas, nil)
+	p.peers = consistenthash.New(defaultReplicas, p.hashFunc)
 	if len(activeAddrs) > 0 {
 		p.peers.Add(activeAddrs...)
 		log.Printf("[HTTPPool] Updated hash ring with nodes: %v", activeAddrs)
 	}
-	
+
 	p.httpGetters = make(map[string]*httpGetter, len(activeAddrs))
 	for _, peer := range activeAddrs {
 		p.httpGetters[peer] = &httpGetter{baseURL: peer + p.basePath}
 		log.Printf("[HTTPPool] Created HTTP getter for peer: %s", peer)
 	}
 
-	// 暂时禁用数据迁移功能
-	// TODO: 实现完整的数据迁移功能
-	// if oldPeers != nil && len(activeAddrs) > 0 {
-	//     go p.triggerMigration(oldPeers, p.peers)
-	// }
+	// 触发数据迁移，清理不再属于当前节点的数据
+	if oldPeers != nil && len(activeAddrs) > 0 {
+		go p.cleanupStaleData(oldPeers, p.peers)
+	}
 }
 
 // nodeListsEqual 检查两个节点列表是否相等
@@ -291,30 +289,30 @@ func (p *HTTPPool) nodeListsEqual(list1, list2 []string) bool {
 	if len(list1) != len(list2) {
 		return false
 	}
-	
+
 	set1 := make(map[string]bool)
 	set2 := make(map[string]bool)
-	
+
 	for _, addr := range list1 {
 		set1[addr] = true
 	}
 	for _, addr := range list2 {
 		set2[addr] = true
 	}
-	
+
 	for addr := range set1 {
 		if !set2[addr] {
 			return false
 		}
 	}
-	
+
 	return true
 }
 
 // triggerMigration 触发数据迁移
 func (p *HTTPPool) triggerMigration(oldPeers, newPeers *consistenthash.Map) {
 	log.Printf("[HTTPPool] Triggering data migration")
-	
+
 	plan := newPeers.GetMigrationPlan(oldPeers)
 	if plan == nil {
 		log.Printf("[HTTPPool] No migration needed")
@@ -337,7 +335,7 @@ func (p *HTTPPool) triggerMigration(oldPeers, newPeers *consistenthash.Map) {
 				}
 
 				if err := p.migrator.MigrateData(context.Background(), migrationPlan); err != nil {
-					log.Printf("[HTTPPool] Failed to migrate data from %s to %s: %v", 
+					log.Printf("[HTTPPool] Failed to migrate data from %s to %s: %v",
 						sourceNode, targetNode, err)
 				}
 			}
@@ -345,14 +343,43 @@ func (p *HTTPPool) triggerMigration(oldPeers, newPeers *consistenthash.Map) {
 	}
 }
 
+// cleanupStaleData 清理不再属于当前节点的数据
+func (p *HTTPPool) cleanupStaleData(oldPeers, newPeers *consistenthash.Map) {
+	log.Printf("[HTTPPool] Starting cleanup of stale data")
+
+	if p.localGroup == nil {
+		log.Printf("[HTTPPool] No local group, skipping cleanup")
+		return
+	}
+
+	// 获取当前缓存中的所有key
+	keys := p.localGroup.GetKeys()
+	log.Printf("[HTTPPool] Found %d keys in cache", len(keys))
+
+	cleanedCount := 0
+	for _, key := range keys {
+		// 使用新的哈希环判断key应该路由到哪个节点
+		targetNode := newPeers.Get(key)
+
+		// 如果key应该路由到其他节点，则从当前节点删除
+		if targetNode != "" && targetNode != p.self {
+			log.Printf("[HTTPPool] Removing stale key %s (should be on %s)", key, targetNode)
+			p.localGroup.Remove(key)
+			cleanedCount++
+		}
+	}
+
+	log.Printf("[HTTPPool] Cleanup completed, removed %d stale keys", cleanedCount)
+}
+
 // UpdateNodes 手动更新节点列表
 func (p *HTTPPool) UpdateNodes(addrs []string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	p.peers = consistenthash.New(defaultReplicas, nil)
+	p.peers = consistenthash.New(defaultReplicas, p.hashFunc)
 	p.peers.Add(addrs...)
-	
+
 	p.httpGetters = make(map[string]*httpGetter, len(addrs))
 	for _, peer := range addrs {
 		p.httpGetters[peer] = &httpGetter{baseURL: peer + p.basePath}

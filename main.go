@@ -30,24 +30,25 @@ type Config struct {
 	EtcdEndpts []string
 }
 
-func createGroup() *jincache.Group {
-	return jincache.NewGroup("scores", 2<<10, jincache.GetterFunc(
+func createGroup() (*jincache.Group, string) {
+	groupName := "scores"
+	return jincache.NewGroup(groupName, 2<<10, jincache.GetterFunc(
 		func(key string) ([]byte, error) {
 			log.Println("[SlowDB] search key", key)
 			if v, ok := db[key]; ok {
 				return []byte(v), nil
 			}
 			return nil, fmt.Errorf("%s not exist", key)
-		}))
+		})), groupName
 }
 
-func startCacheServer(config *Config, jin *jincache.Group) {
+func startCacheServer(config *Config, jin *jincache.Group, groupName string) {
 	// 构建节点地址
 	nodeAddr := fmt.Sprintf("http://localhost:%d", config.Port)
 	nodeID := fmt.Sprintf("node-%d", config.Port)
 
-	// 创建服务发现
-	sd, err := discovery.NewServiceDiscovery(config.EtcdEndpts, nodeID, nodeAddr)
+	// 创建服务发现，指定group名称
+	sd, err := discovery.NewServiceDiscovery(config.EtcdEndpts, nodeID, nodeAddr, groupName)
 	if err != nil {
 		log.Fatalf("Failed to create service discovery: %v", err)
 	}
@@ -243,7 +244,7 @@ func main() {
 	config := parseConfig()
 
 	// 创建缓存组
-	jin := createGroup()
+	jin, groupName := createGroup()
 
 	// 启动API服务器（如果需要）
 	if config.API {
@@ -252,5 +253,5 @@ func main() {
 	}
 
 	// 启动缓存服务器
-	startCacheServer(config, jin)
+	startCacheServer(config, jin, groupName)
 }

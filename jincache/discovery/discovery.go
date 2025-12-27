@@ -14,23 +14,25 @@ import (
 type NodeInfo struct {
 	ID       string `json:"id"`
 	Address  string `json:"address"`
+	Group    string `json:"group"`
 	Status   string `json:"status"`
 	LastSeen int64  `json:"last_seen"`
 }
 
 // ServiceDiscovery 服务发现
 type ServiceDiscovery struct {
-	client   *clientv3.Client
-	nodeID   string
-	nodeAddr string
-	leaseID  clientv3.LeaseID
-	ctx      context.Context
-	cancel   context.CancelFunc
-	stopCh   chan struct{}
+	client     *clientv3.Client
+	nodeID     string
+	nodeAddr   string
+	groupName  string
+	leaseID    clientv3.LeaseID
+	ctx        context.Context
+	cancel     context.CancelFunc
+	stopCh     chan struct{}
 }
 
 // NewServiceDiscovery 创建服务发现实例
-func NewServiceDiscovery(etcdEndpoints []string, nodeID, nodeAddr string) (*ServiceDiscovery, error) {
+func NewServiceDiscovery(etcdEndpoints []string, nodeID, nodeAddr, groupName string) (*ServiceDiscovery, error) {
 	client, err := clientv3.New(clientv3.Config{
 		Endpoints:   etcdEndpoints,
 		DialTimeout: 5 * time.Second,
@@ -42,12 +44,13 @@ func NewServiceDiscovery(etcdEndpoints []string, nodeID, nodeAddr string) (*Serv
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &ServiceDiscovery{
-		client:   client,
-		nodeID:   nodeID,
-		nodeAddr: nodeAddr,
-		ctx:      ctx,
-		cancel:   cancel,
-		stopCh:   make(chan struct{}),
+		client:    client,
+		nodeID:    nodeID,
+		nodeAddr:  nodeAddr,
+		groupName: groupName,
+		ctx:       ctx,
+		cancel:    cancel,
+		stopCh:    make(chan struct{}),
 	}, nil
 }
 
@@ -64,6 +67,7 @@ func (sd *ServiceDiscovery) Register() error {
 	nodeInfo := NodeInfo{
 		ID:       sd.nodeID,
 		Address:  sd.nodeAddr,
+		Group:    sd.groupName,
 		Status:   "active",
 		LastSeen: time.Now().Unix(),
 	}
@@ -74,14 +78,14 @@ func (sd *ServiceDiscovery) Register() error {
 		return fmt.Errorf("failed to marshal node info: %v", err)
 	}
 
-	// 注册节点到etcd
-	key := fmt.Sprintf("/jincache/nodes/%s", sd.nodeID)
+	// 注册节点到etcd，key格式为 /jincache/groups/{group}/nodes/{nodeID}
+	key := fmt.Sprintf("/jincache/groups/%s/nodes/%s", sd.groupName, sd.nodeID)
 	_, err = sd.client.Put(sd.ctx, key, string(data), clientv3.WithLease(sd.leaseID))
 	if err != nil {
 		return fmt.Errorf("failed to register node: %v", err)
 	}
 
-	log.Printf("[Discovery] Registered node %s at %s", sd.nodeID, sd.nodeAddr)
+	log.Printf("[Discovery] Registered node %s (group: %s) at %s", sd.nodeID, sd.groupName, sd.nodeAddr)
 
 	// 启动心跳续约
 	go sd.keepAlive()
@@ -134,6 +138,7 @@ func (sd *ServiceDiscovery) updateNodeInfo() {
 	nodeInfo := NodeInfo{
 		ID:       sd.nodeID,
 		Address:  sd.nodeAddr,
+		Group:    sd.groupName,
 		Status:   "active",
 		LastSeen: time.Now().Unix(),
 	}
@@ -144,16 +149,18 @@ func (sd *ServiceDiscovery) updateNodeInfo() {
 		return
 	}
 
-	key := fmt.Sprintf("/jincache/nodes/%s", sd.nodeID)
+	key := fmt.Sprintf("/jincache/groups/%s/nodes/%s", sd.groupName, sd.nodeID)
 	_, err = sd.client.Put(sd.ctx, key, string(data), clientv3.WithLease(sd.leaseID))
 	if err != nil {
 		log.Printf("[Discovery] Failed to update node info: %v", err)
 	}
 }
 
-// GetNodes 获取所有活跃节点
+// GetNodes 获取所有活跃节点（同一group）
 func (sd *ServiceDiscovery) GetNodes() ([]NodeInfo, error) {
-	resp, err := sd.client.Get(sd.ctx, "/jincache/nodes/", clientv3.WithPrefix())
+	// 只获取同一group的节点
+	prefix := fmt.Sprintf("/jincache/groups/%s/nodes/", sd.groupName)
+	resp, err := sd.client.Get(sd.ctx, prefix, clientv3.WithPrefix())
 	if err != nil {
 		return nil, fmt.Errorf("failed to get nodes: %v", err)
 	}
@@ -171,14 +178,16 @@ func (sd *ServiceDiscovery) GetNodes() ([]NodeInfo, error) {
 	return nodes, nil
 }
 
-// WatchNodes 监听节点变化
+// WatchNodes 监听节点变化（同一group）
 func (sd *ServiceDiscovery) WatchNodes() chan []NodeInfo {
 	nodesCh := make(chan []NodeInfo, 1)
 
 	go func() {
 		defer close(nodesCh)
 
-		watchCh := sd.client.Watch(sd.ctx, "/jincache/nodes/", clientv3.WithPrefix())
+		// 只监听同一group的节点
+		prefix := fmt.Sprintf("/jincache/groups/%s/nodes/", sd.groupName)
+		watchCh := sd.client.Watch(sd.ctx, prefix, clientv3.WithPrefix())
 
 		for {
 			select {
@@ -218,13 +227,13 @@ func (sd *ServiceDiscovery) Deregister() error {
 	}
 
 	// 删除节点信息
-	key := fmt.Sprintf("/jincache/nodes/%s", sd.nodeID)
+	key := fmt.Sprintf("/jincache/groups/%s/nodes/%s", sd.groupName, sd.nodeID)
 	_, err = sd.client.Delete(sd.ctx, key)
 	if err != nil {
 		log.Printf("[Discovery] Failed to delete node: %v", err)
 	}
 
-	log.Printf("[Discovery] Deregistered node %s", sd.nodeID)
+	log.Printf("[Discovery] Deregistered node %s (group: %s)", sd.nodeID, sd.groupName)
 	return nil
 }
 

@@ -71,7 +71,7 @@ func (g *Group) Get(key string) (ByteView, error) {
 	if g.peers != nil {
 		if peer, ok := g.peers.PickPeer(key); ok {
 			// key应该路由到其他节点，转发请求
-			log.Printf("[GeeCache] Routing key %s to peer", key)
+			log.Printf("[JinCache] Routing key %s to peer", key)
 			return g.getFromPeer(peer, key)
 		}
 		// PickPeer返回false表示key应该路由到当前节点
@@ -79,7 +79,7 @@ func (g *Group) Get(key string) (ByteView, error) {
 
 	// key应该路由到当前节点，查本地缓存
 	if v, ok := g.mainCache.get(key); ok {
-		log.Println("[GeeCache] hit")
+		log.Println("[JinCache] hit")
 		return v, nil
 	}
 
@@ -116,7 +116,9 @@ func (g *Group) getFromPeer(peer PeerGetter, key string) (ByteView, error) {
 	res := &pb.Response{}
 	err := peer.Get(req, res)
 	if err != nil {
-		return ByteView{}, err
+		log.Printf("[JinCache] Failed to get from peer, falling back to local: %v", err)
+		// 降级到本地数据源
+		return g.getLocally(key)
 	}
 	return ByteView{b: res.Value}, nil
 }
@@ -164,11 +166,11 @@ func (g *Group) GetRemote(key string) (ByteView, error) {
 
 	// 先检查本地缓存
 	if v, ok := g.mainCache.get(key); ok {
-		log.Println("[GeeCache] remote hit")
+		log.Println("[JinCache] remote hit")
 		return v, nil
 	}
 
 	// 缓存未命中，从数据源获取
-	log.Println("[GeeCache] remote miss, getting from data source")
+	log.Println("[JinCache] remote miss, getting from data source")
 	return g.getLocally(key)
 }

@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	defaultBasePath = "/_geecache/"
+	defaultBasePath = "/_jincache/"
 	defaultReplicas = 50
 )
 
@@ -38,6 +38,109 @@ type HTTPPool struct {
 	migrator   *migration.DataMigrator
 	localGroup *Group
 	stopCh     chan struct{}
+
+	// 容错相关字段
+	nodeHealth        *nodeHealth
+	requestTimeout    time.Duration
+	maxRetries        int
+}
+
+// nodeHealth 管理节点健康状态
+type nodeHealth struct {
+	mu           sync.RWMutex
+	failures     map[string]int        // 失败次数
+	lastFailure  map[string]time.Time  // 最后失败时间
+	blacklist    map[string]time.Time  // 黑名单（节点地址 -> 加入时间）
+	maxFailures  int                   // 最大失败次数
+	blacklistTTL time.Duration         // 黑名单TTL
+}
+
+func newNodeHealth(maxFailures int, blacklistTTL time.Duration) *nodeHealth {
+	return &nodeHealth{
+		failures:     make(map[string]int),
+		lastFailure:  make(map[string]time.Time),
+		blacklist:    make(map[string]time.Time),
+		maxFailures:  maxFailures,
+		blacklistTTL: blacklistTTL,
+	}
+}
+
+// recordFailure 记录节点失败
+func (nh *nodeHealth) recordFailure(nodeAddr string) {
+	nh.mu.Lock()
+	defer nh.mu.Unlock()
+
+	nh.failures[nodeAddr]++
+	nh.lastFailure[nodeAddr] = time.Now()
+
+	// 超过最大失败次数，加入黑名单
+	if nh.failures[nodeAddr] >= nh.maxFailures {
+		nh.blacklist[nodeAddr] = time.Now()
+		log.Printf("[NodeHealth] Node %s added to blacklist (failures: %d)",
+			nodeAddr, nh.failures[nodeAddr])
+	}
+}
+
+// recordSuccess 记录节点成功
+func (nh *nodeHealth) recordSuccess(nodeAddr string) {
+	nh.mu.Lock()
+	defer nh.mu.Unlock()
+
+	// 重置失败计数
+	if nh.failures[nodeAddr] > 0 {
+		delete(nh.failures, nodeAddr)
+		delete(nh.lastFailure, nodeAddr)
+		log.Printf("[NodeHealth] Node %s recovered, resetting failure count", nodeAddr)
+	}
+
+	// 从黑名单中移除
+	if _, exists := nh.blacklist[nodeAddr]; exists {
+		delete(nh.blacklist, nodeAddr)
+		log.Printf("[NodeHealth] Node %s removed from blacklist", nodeAddr)
+	}
+}
+
+// isBlacklisted 检查节点是否在黑名单中
+func (nh *nodeHealth) isBlacklisted(nodeAddr string) bool {
+	nh.mu.RLock()
+	defer nh.mu.RUnlock()
+
+	// 检查是否在黑名单中
+	if _, exists := nh.blacklist[nodeAddr]; exists {
+		// 检查黑名单是否过期
+		if blacklistTime, ok := nh.blacklist[nodeAddr]; ok {
+			if time.Since(blacklistTime) > nh.blacklistTTL {
+				// 过期了，移除黑名单
+				nh.mu.RUnlock()
+				nh.mu.Lock()
+				delete(nh.blacklist, nodeAddr)
+				delete(nh.failures, nodeAddr)
+				delete(nh.lastFailure, nodeAddr)
+				nh.mu.Unlock()
+				nh.mu.RLock()
+				return false
+			}
+		}
+		return true
+	}
+
+	return false
+}
+
+// cleanupBlacklist 清理过期的黑名单项
+func (nh *nodeHealth) cleanupBlacklist() {
+	nh.mu.Lock()
+	defer nh.mu.Unlock()
+
+	now := time.Now()
+	for nodeAddr, blacklistTime := range nh.blacklist {
+		if now.Sub(blacklistTime) > nh.blacklistTTL {
+			delete(nh.blacklist, nodeAddr)
+			delete(nh.failures, nodeAddr)
+			delete(nh.lastFailure, nodeAddr)
+			log.Printf("[NodeHealth] Node %s removed from blacklist (expired)", nodeAddr)
+		}
+	}
 }
 
 // NewHTTPPool initializes an HTTP pool of peers.
@@ -56,20 +159,27 @@ func NewEnhancedHTTPPool(self string, discovery *discovery.ServiceDiscovery, gro
 		hashFunc = hashFuncs[0]
 	}
 	pool := &HTTPPool{
-		self:       self,
-		basePath:   defaultBasePath,
-		discovery:  discovery,
-		localGroup: group,
-		stopCh:     make(chan struct{}),
-		migrator:   migration.NewDataMigrator(&GroupAdapter{group: group}, 100, 30*time.Second),
+		self:            self,
+		basePath:        defaultBasePath,
+		discovery:       discovery,
+		localGroup:      group,
+		stopCh:          make(chan struct{}),
+		migrator:        migration.NewDataMigrator(&GroupAdapter{group: group}, 100, 30*time.Second),
 		// 初始化空的peers，避免空指针
-		peers:       consistenthash.New(defaultReplicas, hashFunc),
-		hashFunc:    hashFunc,
-		httpGetters: make(map[string]*httpGetter),
+		peers:           consistenthash.New(defaultReplicas, hashFunc),
+		hashFunc:        hashFunc,
+		httpGetters:     make(map[string]*httpGetter),
+		// 容错配置
+		nodeHealth:      newNodeHealth(3, 5*time.Minute),  // 3次失败后加入黑名单，5分钟后恢复
+		requestTimeout:  3 * time.Second,                   // 3秒超时
+		maxRetries:      2,                                  // 最多重试2次
 	}
 
 	// 启动节点监听
 	go pool.watchNodes()
+
+	// 启动黑名单清理协程
+	go pool.cleanupBlacklistRoutine()
 
 	return pool
 }
@@ -129,7 +239,22 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type httpGetter struct {
-	baseURL string
+	baseURL     string
+	httpClient  *http.Client
+	maxRetries  int
+	timeout     time.Duration
+	pool        *HTTPPool // 引用pool以记录节点健康状态
+}
+
+func newHTTPGetter(baseURL string, timeout time.Duration, maxRetries int) *httpGetter {
+	return &httpGetter{
+		baseURL: baseURL,
+		httpClient: &http.Client{
+			Timeout: timeout,
+		},
+		maxRetries: maxRetries,
+		timeout:    timeout,
+	}
 }
 
 func (h *httpGetter) Get(in *pb.Request, out *pb.Response) error {
@@ -140,34 +265,76 @@ func (h *httpGetter) Get(in *pb.Request, out *pb.Response) error {
 		url.QueryEscape(in.GetKey()),
 	)
 
-	log.Printf("[httpGetter] Making request to: %s", u)
+	var lastErr error
 
-	res, err := http.Get(u)
-	if err != nil {
-		log.Printf("[httpGetter] Request failed: %v", err)
-		return err
+	// 重试机制
+	for attempt := 0; attempt <= h.maxRetries; attempt++ {
+		if attempt > 0 {
+			// 指数退避
+			backoff := time.Duration(1<<uint(attempt-1)) * 100 * time.Millisecond
+			log.Printf("[httpGetter] Retry attempt %d after %v", attempt, backoff)
+			time.Sleep(backoff)
+		}
+
+		log.Printf("[httpGetter] Making request to: %s (attempt %d)", u, attempt+1)
+
+		req, err := http.NewRequest("GET", u, nil)
+		if err != nil {
+			lastErr = err
+			log.Printf("[httpGetter] Failed to create request: %v", err)
+			continue
+		}
+
+		res, err := h.httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			log.Printf("[httpGetter] Request failed: %v", err)
+			continue
+		}
+
+		log.Printf("[httpGetter] Response status: %s", res.Status)
+
+		if res.StatusCode != http.StatusOK {
+			res.Body.Close()
+			lastErr = fmt.Errorf("server returned: %v", res.Status)
+			log.Printf("[httpGetter] Server error: %v", lastErr)
+			continue
+		}
+
+		bytes, err := io.ReadAll(res.Body)
+		res.Body.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("reading response body: %v", err)
+			log.Printf("[httpGetter] Failed to read response: %v", lastErr)
+			continue
+		}
+
+		if err = proto.Unmarshal(bytes, out); err != nil {
+			lastErr = fmt.Errorf("decoding response body: %v", err)
+			log.Printf("[httpGetter] Failed to decode response: %v", lastErr)
+			continue
+		}
+
+		log.Printf("[httpGetter] Successfully got value for key: %s", in.GetKey())
+
+		// 记录成功
+		if h.pool != nil {
+			// 从baseURL中提取节点地址（移除basePath）
+			nodeAddr := strings.TrimSuffix(h.baseURL, h.pool.basePath)
+			h.pool.RecordPeerSuccess(nodeAddr)
+		}
+
+		return nil
 	}
-	defer res.Body.Close()
 
-	log.Printf("[httpGetter] Response status: %s", res.Status)
-
-	if res.StatusCode != http.StatusOK {
-		return fmt.Errorf("server returned: %v", res.Status)
+	// 所有重试都失败，记录失败
+	if h.pool != nil {
+		nodeAddr := strings.TrimSuffix(h.baseURL, h.pool.basePath)
+		h.pool.RecordPeerFailure(nodeAddr)
 	}
 
-	bytes, err := io.ReadAll(res.Body)
-	if err != nil {
-		return fmt.Errorf("reading response body: %v", err)
-	}
-
-	if err = proto.Unmarshal(bytes, out); err != nil {
-		return fmt.Errorf("decoding response body: %v", err)
-	}
-
-	log.Printf("[httpGetter] Successfully got value for key: %s", in.GetKey())
-	return nil
+	return lastErr
 }
-
 var _ PeerGetter = (*httpGetter)(nil)
 
 // Set updates the pool's list of peers.
@@ -201,6 +368,24 @@ func (p *HTTPPool) PickPeer(key string) (PeerGetter, bool) {
 	// 如果选择的是当前节点，返回false表示不需要转发
 	if selectedPeer == p.self {
 		p.Log("Key %s routes to self", key)
+		return nil, false
+	}
+
+	// 检查节点是否在黑名单中
+	if p.nodeHealth.isBlacklisted(selectedPeer) {
+		p.Log("Node %s is blacklisted, skipping", selectedPeer)
+		// 尝试选择其他健康节点
+		nodes := p.peers.GetNodes()
+		for _, node := range nodes {
+			if node != p.self && node != selectedPeer && !p.nodeHealth.isBlacklisted(node) {
+				p.Log("Picking alternative peer %s instead of blacklisted %s", node, selectedPeer)
+				if getter, exists := p.httpGetters[node]; exists {
+					return getter, true
+				}
+			}
+		}
+		// 没有可用的健康节点，返回nil，触发降级
+		p.Log("No healthy peers available, will fallback to local")
 		return nil, false
 	}
 
@@ -274,8 +459,12 @@ func (p *HTTPPool) handleNodeChange(nodes []discovery.NodeInfo) {
 
 	p.httpGetters = make(map[string]*httpGetter, len(activeAddrs))
 	for _, peer := range activeAddrs {
-		p.httpGetters[peer] = &httpGetter{baseURL: peer + p.basePath}
-		log.Printf("[HTTPPool] Created HTTP getter for peer: %s", peer)
+		// 使用新的构造函数创建带容错功能的getter
+		getter := newHTTPGetter(peer+p.basePath, p.requestTimeout, p.maxRetries)
+		getter.pool = p // 设置pool引用以便记录节点健康状态
+		p.httpGetters[peer] = getter
+		log.Printf("[HTTPPool] Created HTTP getter for peer: %s (timeout: %v, retries: %d)",
+			peer, p.requestTimeout, p.maxRetries)
 	}
 
 	// 触发数据迁移，清理不再属于当前节点的数据
@@ -370,6 +559,31 @@ func (p *HTTPPool) cleanupStaleData(oldPeers, newPeers *consistenthash.Map) {
 	}
 
 	log.Printf("[HTTPPool] Cleanup completed, removed %d stale keys", cleanedCount)
+}
+
+// cleanupBlacklistRoutine 定期清理黑名单
+func (p *HTTPPool) cleanupBlacklistRoutine() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-p.stopCh:
+			return
+		case <-ticker.C:
+			p.nodeHealth.cleanupBlacklist()
+		}
+	}
+}
+
+// RecordPeerFailure 记录节点失败（供外部调用）
+func (p *HTTPPool) RecordPeerFailure(peerAddr string) {
+	p.nodeHealth.recordFailure(peerAddr)
+}
+
+// RecordPeerSuccess 记录节点成功（供外部调用）
+func (p *HTTPPool) RecordPeerSuccess(peerAddr string) {
+	p.nodeHealth.recordSuccess(peerAddr)
 }
 
 // UpdateNodes 手动更新节点列表

@@ -288,7 +288,7 @@
     5 
     6     // 1. 尝试从本地缓存获取
     7     if v, ok := g.mainCache.get(key); ok {
-    8         log.Println("[GeeCache] hit")
+    8         log.Println("[JinCache] hit")
     9         return v, nil
    10     }
    11 

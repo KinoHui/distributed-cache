@@ -8,6 +8,7 @@ option go_package = "/root/go-demos-24/distributed-cache-demo/jincache/jincachep
 message Request {
   string group = 1;
   string key = 2;
+  bytes value = 3;
 }
 
 message Response {

@@ -6,6 +6,7 @@ import (
 	"distributed-cache-demo/jincache/discovery"
 	pb "distributed-cache-demo/jincache/jincachepb"
 	"distributed-cache-demo/jincache/migration"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -195,6 +196,7 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		panic("HTTPPool serving unexpected path: " + r.URL.Path)
 	}
 	p.Log("%s %s", r.Method, r.URL.Path)
+
 	// /<basepath>/<groupname>/<key> required
 	parts := strings.SplitN(r.URL.Path[len(p.basePath):], "/", 2)
 	if len(parts) != 2 {
@@ -206,6 +208,12 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	groupName := parts[0]
 	key := parts[1]
 
+	// 处理统计信息请求
+	if key == "_stats" {
+		p.handleStatsRequest(w, r, groupName)
+		return
+	}
+
 	log.Printf("[ServeHTTP] Processing request for group: %s, key: %s", groupName, key)
 
 	group := GetGroup(groupName)
@@ -215,10 +223,24 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 对于来自其他节点的请求，使用GetRemote方法避免循环转发
-	log.Printf("[ServeHTTP] Remote request, using Group.GetRemote")
+	// 根据HTTP方法分发
+	switch r.Method {
+	case "GET":
+		p.handleGetRequest(w, r, group, key)
+	case "PUT":
+		p.handleSetRequest(w, r, group, key)
+	case "DELETE":
+		p.handleDeleteRequest(w, r, group, key)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
 
-	// 使用GetRemote方法，它会检查缓存但不会转发给其他节点
+// handleGetRequest 处理GET请求
+func (p *HTTPPool) handleGetRequest(w http.ResponseWriter, r *http.Request, group *Group, key string) {
+	// 对于来自其他节点的请求，使用GetRemote方法避免循环转发
+	log.Printf("[ServeHTTP] Remote GET request, using Group.GetRemote")
+
 	view, err := group.GetRemote(key)
 	if err != nil {
 		log.Printf("[ServeHTTP] Failed to get key %s remotely: %v", key, err)
@@ -240,6 +262,80 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[ServeHTTP] Successfully returning value for key: %s", key)
 	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Write(body)
+}
+
+// handleSetRequest 处理PUT请求
+func (p *HTTPPool) handleSetRequest(w http.ResponseWriter, r *http.Request, group *Group, key string) {
+	log.Printf("[ServeHTTP] Processing SET request for key: %s", key)
+
+	// 读取请求体
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("[ServeHTTP] Failed to read request body: %v", err)
+		http.Error(w, "failed to read request body", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	// 解析protobuf请求
+	var req pb.Request
+	if err = proto.Unmarshal(body, &req); err != nil {
+		log.Printf("[ServeHTTP] Failed to unmarshal request: %v", err)
+		http.Error(w, "failed to unmarshal request", http.StatusBadRequest)
+		return
+	}
+
+	// 设置缓存值
+	group.PopulateCache(key, ByteView{b: req.Value})
+
+	log.Printf("[ServeHTTP] Successfully set value for key: %s", key)
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleDeleteRequest 处理DELETE请求
+func (p *HTTPPool) handleDeleteRequest(w http.ResponseWriter, r *http.Request, group *Group, key string) {
+	log.Printf("[ServeHTTP] Processing DELETE request for key: %s", key)
+
+	// 删除缓存值
+	group.Remove(key)
+
+	log.Printf("[ServeHTTP] Successfully deleted key: %s", key)
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleStatsRequest 处理统计信息请求
+func (p *HTTPPool) handleStatsRequest(w http.ResponseWriter, r *http.Request, groupName string) {
+	group := GetGroup(groupName)
+	if group == nil {
+		log.Printf("[ServeHTTP] No such group: %s", groupName)
+		http.Error(w, "no such group: "+groupName, http.StatusNotFound)
+		return
+	}
+
+	keys := group.GetKeys()
+
+	// 计算缓存大小（简化实现，实际可能需要更精确的计算）
+	bytesUsed := int64(0)
+	for _, key := range keys {
+		if view, ok := group.mainCache.get(key); ok {
+			bytesUsed += int64(len(view.b))
+		}
+	}
+
+	stats := map[string]interface{}{
+		"keys_count": len(keys),
+		"bytes_used": bytesUsed,
+	}
+
+	body, err := json.Marshal(stats)
+	if err != nil {
+		log.Printf("[ServeHTTP] Failed to marshal stats: %v", err)
+		http.Error(w, "failed to marshal stats", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
 	w.Write(body)
 }
 

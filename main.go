@@ -2,9 +2,12 @@ package main
 
 import (
 	"distributed-cache-demo/jincache"
+	"distributed-cache-demo/jincache/client"
 	"distributed-cache-demo/jincache/discovery"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -77,23 +80,114 @@ func startCacheServer(config *Config, jin *jincache.Group) {
 }
 
 func startAPIServer(apiAddr string, jin *jincache.Group) {
-	http.Handle("/api", http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			key := r.URL.Query().Get("key")
-			view, err := jin.Get(key)
-			if err != nil {
-				// 判断是否是key不存在的错误
-				if err == jincache.KeyNotFoundError {
-					http.Error(w, "key not found: "+key, http.StatusNotFound)
-				} else {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-				}
-				return
+	// 创建缓存客户端，连接到本地缓存服务器
+	cacheClient := client.NewClient("http://localhost:8001")
+
+	// GET /api?key=<key> - 获取缓存值
+	http.HandleFunc("/api", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		key := r.URL.Query().Get("key")
+		if key == "" {
+			http.Error(w, "key parameter is required", http.StatusBadRequest)
+			return
+		}
+
+		value, err := cacheClient.Get("scores", key)
+		if err != nil {
+			if err.Error() == "key not found: "+key {
+				http.Error(w, err.Error(), http.StatusNotFound)
+			} else {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
 			}
-			w.Header().Set("Content-Type", "application/octet-stream")
-			w.Write(view.ByteSlice())
-		}))
-	log.Println("[Main] Frontend server is running at", apiAddr)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Write(value)
+	})
+
+	// POST /api/set - 设置缓存值
+	http.HandleFunc("/api/set", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		key := r.URL.Query().Get("key")
+		if key == "" {
+			http.Error(w, "key parameter is required", http.StatusBadRequest)
+			return
+		}
+
+		value, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "failed to read request body", http.StatusBadRequest)
+			return
+		}
+		defer r.Body.Close()
+
+		if err := cacheClient.Set("scores", key, value); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+
+	// DELETE /api/delete?key=<key> - 删除缓存值
+	http.HandleFunc("/api/delete", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "DELETE" {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		key := r.URL.Query().Get("key")
+		if key == "" {
+			http.Error(w, "key parameter is required", http.StatusBadRequest)
+			return
+		}
+
+		if err := cacheClient.Delete("scores", key); err != nil {
+			if err.Error() == "key not found: "+key {
+				http.Error(w, err.Error(), http.StatusNotFound)
+			} else {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+
+	// GET /api/stats - 获取统计信息
+	http.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		stats, err := cacheClient.GetStats("scores")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(stats)
+	})
+
+	log.Println("[Main] API server is running at", apiAddr)
+	log.Println("[Main] Available endpoints:")
+	log.Println("[Main]   GET    /api?key=<key>          - Get value")
+	log.Println("[Main]   POST   /api/set?key=<key>      - Set value")
+	log.Println("[Main]   DELETE /api/delete?key=<key>   - Delete value")
+	log.Println("[Main]   GET    /api/stats              - Get statistics")
 	log.Fatal(http.ListenAndServe(":9999", nil))
 }
 
@@ -152,7 +246,8 @@ func main() {
 
 	// 启动API服务器（如果需要）
 	if config.API {
-		go startAPIServer(config.APIAddr, jin)
+		startAPIServer(config.APIAddr, jin)
+		return
 	}
 
 	// 启动缓存服务器

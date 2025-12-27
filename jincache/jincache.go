@@ -1,12 +1,16 @@
 package jincache
 
 import (
+	errors "errors"
 	pb "distributed-cache-demo/jincache/jincachepb"
 	"distributed-cache-demo/jincache/singleflight"
 	"fmt"
 	"log"
 	"sync"
 )
+
+// KeyNotFoundError 表示key不存在的错误
+var KeyNotFoundError = errors.New("key not found")
 
 // A Getter loads data for a key. 缓存中没有数据时，从外部数据源获取数据
 type Getter interface {
@@ -116,6 +120,11 @@ func (g *Group) getFromPeer(peer PeerGetter, key string) (ByteView, error) {
 	res := &pb.Response{}
 	err := peer.Get(req, res)
 	if err != nil {
+		// 如果是key不存在的错误，直接返回，不降级
+		if err == KeyNotFoundError {
+			log.Printf("[JinCache] Key not found on peer: %s", key)
+			return ByteView{}, KeyNotFoundError
+		}
 		log.Printf("[JinCache] Failed to get from peer, falling back to local: %v", err)
 		// 降级到本地数据源
 		return g.getLocally(key)
@@ -126,8 +135,7 @@ func (g *Group) getFromPeer(peer PeerGetter, key string) (ByteView, error) {
 func (g *Group) getLocally(key string) (ByteView, error) {
 	bytes, err := g.getter.Get(key)
 	if err != nil {
-		return ByteView{}, err
-
+		return ByteView{}, KeyNotFoundError
 	}
 	value := ByteView{b: cloneBytes(bytes)}
 	g.populateCache(key, value)

@@ -82,7 +82,12 @@ func startAPIServer(apiAddr string, jin *jincache.Group) {
 			key := r.URL.Query().Get("key")
 			view, err := jin.Get(key)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				// 判断是否是key不存在的错误
+				if err == jincache.KeyNotFoundError {
+					http.Error(w, "key not found: "+key, http.StatusNotFound)
+				} else {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+				}
 				return
 			}
 			w.Header().Set("Content-Type", "application/octet-stream")

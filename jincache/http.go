@@ -222,7 +222,12 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	view, err := group.GetRemote(key)
 	if err != nil {
 		log.Printf("[ServeHTTP] Failed to get key %s remotely: %v", key, err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		// 判断是否是key不存在的错误
+		if err == KeyNotFoundError {
+			http.Error(w, "key not found: "+key, http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 		return
 	}
 
@@ -293,6 +298,18 @@ func (h *httpGetter) Get(in *pb.Request, out *pb.Response) error {
 		}
 
 		log.Printf("[httpGetter] Response status: %s", res.Status)
+
+		if res.StatusCode == http.StatusNotFound {
+			// 404表示key不存在，这是正常响应，不应该算作失败
+			res.Body.Close()
+			log.Printf("[httpGetter] Key not found: %s", in.GetKey())
+			// 记录成功（404也是成功的响应）
+			if h.pool != nil {
+				nodeAddr := strings.TrimSuffix(h.baseURL, h.pool.basePath)
+				h.pool.RecordPeerSuccess(nodeAddr)
+			}
+			return KeyNotFoundError
+		}
 
 		if res.StatusCode != http.StatusOK {
 			res.Body.Close()

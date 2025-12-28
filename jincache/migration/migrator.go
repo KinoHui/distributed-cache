@@ -3,11 +3,15 @@ package migration
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
 	pb "distributed-cache-demo/jincache/jincachepb"
+	"google.golang.org/protobuf/proto"
 )
 
 // CacheGroup 缓存组接口，避免循环导入
@@ -103,8 +107,7 @@ func (dm *DataMigrator) migrateKey(ctx context.Context, key, sourceNode string) 
 		Key:   key,
 	}
 
-	// 这里需要通过HTTP客户端从源节点获取数据
-	// 简化实现，实际中需要创建HTTP客户端
+	// 通过HTTP客户端从源节点获取数据
 	data, err := dm.fetchFromSource(ctx, sourceNode, req)
 	if err != nil {
 		return fmt.Errorf("failed to fetch key %s from source: %v", key, err)
@@ -119,9 +122,49 @@ func (dm *DataMigrator) migrateKey(ctx context.Context, key, sourceNode string) 
 
 // fetchFromSource 从源节点获取数据
 func (dm *DataMigrator) fetchFromSource(ctx context.Context, sourceNode string, req *pb.Request) ([]byte, error) {
-	// 这里应该实现HTTP客户端从源节点获取数据
-	// 为了简化，暂时返回错误，实际实现时需要补充
-	return nil, fmt.Errorf("fetchFromSource not implemented yet")
+	// 构造请求URL
+	u := fmt.Sprintf(
+		"%v%v/%v",
+		sourceNode,
+		url.QueryEscape(req.GetGroup()),
+		url.QueryEscape(req.GetKey()),
+	)
+
+	// 创建HTTP请求
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %v", err)
+	}
+
+	// 发送请求
+	client := &http.Client{Timeout: dm.timeout}
+	res, err := client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch from source: %v", err)
+	}
+	defer res.Body.Close()
+
+	// 检查响应状态
+	if res.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("key not found on source node")
+	}
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("source node returned status: %d", res.StatusCode)
+	}
+
+	// 读取响应体
+	data, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %v", err)
+	}
+
+	// 解析protobuf响应
+	var pbRes pb.Response
+	if err := proto.Unmarshal(data, &pbRes); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %v", err)
+	}
+
+	return pbRes.Value, nil
 }
 
 // GetKeysToMigrate 获取需要迁移的keys

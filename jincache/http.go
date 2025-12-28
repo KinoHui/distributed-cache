@@ -790,8 +790,9 @@ func (p *HTTPPool) triggerMigration(oldPeers, newPeers *consistenthash.Map) {
 }
 
 // cleanupStaleData 清理不再属于当前节点的数据
+// 采用"先迁移，后清理"的策略，避免缓存雪崩
 func (p *HTTPPool) cleanupStaleData(oldPeers, newPeers *consistenthash.Map) {
-	log.Printf("[HTTPPool] Starting cleanup of stale data")
+	log.Printf("[HTTPPool] Starting migration and cleanup of stale data")
 
 	if p.localGroup == nil {
 		log.Printf("[HTTPPool] No local group, skipping cleanup")
@@ -802,20 +803,90 @@ func (p *HTTPPool) cleanupStaleData(oldPeers, newPeers *consistenthash.Map) {
 	keys := p.localGroup.GetKeys()
 	log.Printf("[HTTPPool] Found %d keys in cache", len(keys))
 
-	cleanedCount := 0
+	// 第一步：识别需要迁移的key
+	keysToMigrate := make(map[string]string) // key -> targetNode
 	for _, key := range keys {
 		// 使用新的哈希环判断key应该路由到哪个节点
 		targetNode := newPeers.Get(key)
 
-		// 如果key应该路由到其他节点，则从当前节点删除
+		// 如果key应该路由到其他节点，则需要迁移
 		if targetNode != "" && targetNode != p.self {
-			log.Printf("[HTTPPool] Removing stale key %s (should be on %s)", key, targetNode)
-			p.localGroup.Remove(key)
-			cleanedCount++
+			keysToMigrate[key] = targetNode
 		}
 	}
 
-	log.Printf("[HTTPPool] Cleanup completed, removed %d stale keys", cleanedCount)
+	if len(keysToMigrate) == 0 {
+		log.Printf("[HTTPPool] No keys need migration")
+		return
+	}
+
+	log.Printf("[HTTPPool] Found %d keys that need migration", len(keysToMigrate))
+
+	// 第二步：将数据迁移到目标节点
+	migratedCount := 0
+	failedCount := 0
+
+	for key, targetNode := range keysToMigrate {
+		// 直接从本地缓存获取数据，避免触发路由
+		view, ok := p.localGroup.mainCache.get(key)
+		if !ok {
+			log.Printf("[HTTPPool] Failed to get key %s from local cache (not found)", key)
+			failedCount++
+			continue
+		}
+
+		// 构造迁移请求
+		req := &pb.Request{
+			Group: p.localGroup.Name(),
+			Key:   key,
+			Value: view.ByteSlice(),
+		}
+
+		// 获取目标节点的HTTP客户端
+		p.mu.Lock()
+		client, exists := p.httpPeerClients[targetNode]
+		p.mu.Unlock()
+
+		if !exists {
+			log.Printf("[HTTPPool] No HTTP client found for target node %s, skipping migration of key %s",
+				targetNode, key)
+			failedCount++
+			continue
+		}
+
+		// 将数据设置到目标节点
+		if err := client.Set(req); err != nil {
+			log.Printf("[HTTPPool] Failed to migrate key %s to %s: %v", key, targetNode, err)
+			failedCount++
+			continue
+		}
+
+		log.Printf("[HTTPPool] Successfully migrated key %s to %s", key, targetNode)
+		migratedCount++
+	}
+
+	log.Printf("[HTTPPool] Migration completed: %d succeeded, %d failed", migratedCount, failedCount)
+
+	// 第三步：延迟清理已迁移的数据
+	// 只清理成功迁移的数据，失败的保留以避免数据丢失
+	if migratedCount > 0 {
+		time.Sleep(500 * time.Millisecond)
+
+		cleanedCount := 0
+		for key, targetNode := range keysToMigrate {
+			// 再次检查key是否仍需要迁移（防止在迁移期间节点列表再次变化）
+			currentTarget := newPeers.Get(key)
+			if currentTarget != "" && currentTarget != p.self && currentTarget == targetNode {
+				log.Printf("[HTTPPool] Removing migrated key %s (now on %s)", key, targetNode)
+				p.localGroup.Remove(key)
+				cleanedCount++
+			}
+		}
+
+		log.Printf("[HTTPPool] Cleanup completed, removed %d migrated keys", cleanedCount)
+	} else {
+		log.Printf("[HTTPPool] No successful migrations, skipping cleanup to avoid data loss")
+	}
 }
 
 // cleanupBlacklistRoutine 定期清理黑名单

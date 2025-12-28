@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 )
 
@@ -24,22 +25,27 @@ var db = map[string]string{
 
 // Config 配置结构
 type Config struct {
-	Port       int
-	API        bool
-	APIAddr    string
-	EtcdEndpts []string
+	Port         int
+	API          bool
+	APIAddr      string
+	EtcdEndpts   []string
+	GroupName    string
+	EnableGetter bool
 }
 
-func createGroup() (*jincache.Group, string) {
-	groupName := "scores"
-	return jincache.NewGroup(groupName, 2<<10, jincache.GetterFunc(
-		func(key string) ([]byte, error) {
-			log.Println("[SlowDB] search key", key)
-			if v, ok := db[key]; ok {
-				return []byte(v), nil
-			}
-			return nil, fmt.Errorf("%s not exist", key)
-		})), groupName
+func createGroup(groupName string, enableGetter bool) (*jincache.Group, string) {
+	var getter jincache.Getter
+	if enableGetter {
+		getter = jincache.GetterFunc(
+			func(key string) ([]byte, error) {
+				log.Println("[SlowDB] search key", key)
+				if v, ok := db[key]; ok {
+					return []byte(v), nil
+				}
+				return nil, fmt.Errorf("%s not exist", key)
+			})
+	}
+	return jincache.NewGroup(groupName, 2<<10, getter), groupName
 }
 
 func startCacheServer(config *Config, jin *jincache.Group, groupName string) {
@@ -98,7 +104,7 @@ func startAPIServer(apiAddr string, jin *jincache.Group) {
 			return
 		}
 
-		value, err := cacheClient.Get("scores", key)
+		value, err := cacheClient.Get(jin.Name(), key)
 		if err != nil {
 			if err.Error() == "key not found: "+key {
 				http.Error(w, err.Error(), http.StatusNotFound)
@@ -132,7 +138,7 @@ func startAPIServer(apiAddr string, jin *jincache.Group) {
 		}
 		defer r.Body.Close()
 
-		if err := cacheClient.Set("scores", key, value); err != nil {
+		if err := cacheClient.Set(jin.Name(), key, value); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -154,7 +160,7 @@ func startAPIServer(apiAddr string, jin *jincache.Group) {
 			return
 		}
 
-		if err := cacheClient.Delete("scores", key); err != nil {
+		if err := cacheClient.Delete(jin.Name(), key); err != nil {
 			if err.Error() == "key not found: "+key {
 				http.Error(w, err.Error(), http.StatusNotFound)
 			} else {
@@ -174,7 +180,7 @@ func startAPIServer(apiAddr string, jin *jincache.Group) {
 			return
 		}
 
-		stats, err := cacheClient.GetStats("scores")
+		stats, err := cacheClient.GetStats(jin.Name())
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -222,6 +228,8 @@ func parseConfig() *Config {
 
 	flag.IntVar(&config.Port, "port", 8001, "jincache server port")
 	flag.BoolVar(&config.API, "api", false, "Start a api server?")
+	flag.StringVar(&config.GroupName, "groupname", "default-group", "cache group name")
+	flag.BoolVar(&config.EnableGetter, "enableGetter", false, "enable getter for loading data from source")
 
 	// 解析etcd端点
 	var etcdEndpoints string
@@ -235,7 +243,7 @@ func parseConfig() *Config {
 		config.EtcdEndpts = []string{"http://192.168.59.132:2379"} // 默认值
 	}
 
-	config.APIAddr = "http://localhost:9999"
+	config.APIAddr = "http://localhost:" + strconv.Itoa(config.Port)
 
 	return config
 }
@@ -244,7 +252,7 @@ func main() {
 	config := parseConfig()
 
 	// 创建缓存组
-	jin, groupName := createGroup()
+	jin, groupName := createGroup(config.GroupName, config.EnableGetter)
 
 	// 启动API服务器（如果需要）
 	if config.API {

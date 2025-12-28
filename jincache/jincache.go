@@ -34,6 +34,7 @@ type Group struct {
 	// use singleflight.Group to make sure that
 	// each key is only fetched once
 	loader *singleflight.Group
+	enableGetter bool
 }
 
 var (
@@ -43,14 +44,17 @@ var (
 
 // NewGroup create a new instance of Group
 func NewGroup(name string, cacheBytes int64, getter Getter) *Group {
-	if getter == nil {
-		panic("nil Getter!")
-	}
-
 	mu.Lock()
 	defer mu.Unlock()
 
-	g := &Group{name: name, getter: getter, mainCache: cache{cacheBytes: cacheBytes}, loader: &singleflight.Group{}}
+	enableGetter := getter != nil
+	g := &Group{
+		name: name,
+		getter: getter,
+		mainCache: cache{cacheBytes: cacheBytes},
+		loader: &singleflight.Group{},
+		enableGetter: enableGetter,
+	}
 
 	groups[name] = g
 	return g
@@ -87,17 +91,21 @@ func (g *Group) Get(key string) (ByteView, error) {
 		return v, nil
 	}
 
-	// 缓存未命中，从数据源加载
-	// each key is only fetched once from data source
-	// regardless of the number of concurrent callers.
-	viewi, err := g.loader.Do(key, func() (interface{}, error) {
-		return g.getLocally(key)
-	})
+	// 缓存未命中，如果启用了getter则从数据源加载
+	if g.enableGetter {
+		// each key is only fetched once from data source
+		// regardless of the number of concurrent callers.
+		viewi, err := g.loader.Do(key, func() (interface{}, error) {
+			return g.getLocally(key)
+		})
 
-	if err == nil {
-		return viewi.(ByteView), nil
+		if err == nil {
+			return viewi.(ByteView), nil
+		}
+		return ByteView{}, err
 	}
-	return ByteView{}, err
+
+	return ByteView{}, KeyNotFoundError
 }
 
 // RegisterPeers registers a PeerPicker for choosing remote peer
@@ -134,9 +142,12 @@ func (g *Group) getFromPeer(peer PeerClient, key string) (ByteView, error) {
 			log.Printf("[JinCache] Key not found on peer: %s", key)
 			return ByteView{}, KeyNotFoundError
 		}
-		log.Printf("[JinCache] Failed to get from peer, falling back to local: %v", err)
-		// 降级到本地数据源
-		return g.getLocally(key)
+		log.Printf("[JinCache] Failed to get from peer: %v", err)
+		// 如果启用了getter，降级到本地数据源
+		if g.enableGetter {
+			return g.getLocally(key)
+		}
+		return ByteView{}, err
 	}
 	return ByteView{b: res.Value}, nil
 }

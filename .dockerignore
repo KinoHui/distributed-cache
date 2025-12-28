@@ -1,8 +1,10 @@
+# Git
+.git
+.gitignore
 
 # 文档
 *.md
 !README.md
-!DOCKER.md
 
 # 测试
 test/

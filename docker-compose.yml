@@ -1,0 +1,120 @@
+version: '3.8'
+
+services:
+  # etcd 服务发现
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.9
+    container_name: jincache-etcd
+    ports:
+      - "2379:2379"
+      - "2380:2380"
+    environment:
+      - ETCD_NAME=etcd0
+      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+      - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
+      - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
+      - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://etcd:2380
+      - ETCD_INITIAL_CLUSTER=etcd0=http://etcd:2380
+      - ETCD_INITIAL_CLUSTER_STATE=new
+      - ETCD_INITIAL_CLUSTER_TOKEN=etcd-cluster
+    networks:
+      - jincache-network
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # 缓存节点 1
+  cache-node-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jincache-node-1
+    ports:
+      - "8001:8001"
+    environment:
+      - PORT=8001
+      - GROUPNAME=default-group
+      - ETCD_ENDPOINTS=http://etcd:2379
+      - ENABLE_GETTER=true
+    command: ["./jincache", "-port=8001", "-groupname=default-group", "-etcd=etcd:2379", "-enableGetter"]
+    depends_on:
+      etcd:
+        condition: service_healthy
+    networks:
+      - jincache-network
+    restart: unless-stopped
+
+  # 缓存节点 2
+  cache-node-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jincache-node-2
+    ports:
+      - "8002:8002"
+    environment:
+      - PORT=8002
+      - GROUPNAME=default-group
+      - ETCD_ENDPOINTS=http://etcd:2379
+      - ENABLE_GETTER=true
+    command: ["./jincache", "-port=8002", "-groupname=default-group", "-etcd=etcd:2379", "-enableGetter"]
+    depends_on:
+      etcd:
+        condition: service_healthy
+    networks:
+      - jincache-network
+    restart: unless-stopped
+
+  # 缓存节点 3
+  cache-node-3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jincache-node-3
+    ports:
+      - "8003:8003"
+    environment:
+      - PORT=8003
+      - GROUPNAME=default-group
+      - ETCD_ENDPOINTS=http://etcd:2379
+      - ENABLE_GETTER=true
+    command: ["./jincache", "-port=8003", "-groupname=default-group", "-etcd=etcd:2379", "-enableGetter"]
+    depends_on:
+      etcd:
+        condition: service_healthy
+    networks:
+      - jincache-network
+    restart: unless-stopped
+
+  # API 服务器
+  api-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jincache-api
+    ports:
+      - "9999:9999"
+    environment:
+      - PORT=9999
+      - API=true
+      - GROUPNAME=default-group
+      - ETCD_ENDPOINTS=http://etcd:2379
+    command: ["./jincache", "-port=9999", "-api", "-groupname=default-group", "-etcd=etcd:2379"]
+    depends_on:
+      etcd:
+        condition: service_healthy
+      cache-node-1:
+        condition: service_started
+      cache-node-2:
+        condition: service_started
+      cache-node-3:
+        condition: service_started
+    networks:
+      - jincache-network
+    restart: unless-stopped
+
+networks:
+  jincache-network:
+    driver: bridge

@@ -87,8 +87,8 @@ func startCacheServer(config *Config, jin *jincache.Group, groupName string) {
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", config.Port), peers))
 }
 
-func startAPIServer(apiAddr string, jin *jincache.Group) {
-	// 创建缓存客户端，连接到本地缓存服务器
+func startAPIServer(apiPort int, jin *jincache.Group) {
+	// 创建缓存客户端，连接到本地缓存服务器 todo:改为使用etcd信息以及group来获取对应group的信息
 	cacheClient := client.NewClient("http://localhost:8001")
 
 	// GET /api?key=<key> - 获取缓存值
@@ -190,13 +190,14 @@ func startAPIServer(apiAddr string, jin *jincache.Group) {
 		json.NewEncoder(w).Encode(stats)
 	})
 
-	log.Println("[Main] API server is running at", apiAddr)
+	apiPortStr := strconv.Itoa(apiPort)
+	log.Println("[Main] API server is running at", apiPortStr)
 	log.Println("[Main] Available endpoints:")
 	log.Println("[Main]   GET    /api?key=<key>          - Get value")
 	log.Println("[Main]   POST   /api/set?key=<key>      - Set value")
 	log.Println("[Main]   DELETE /api/delete?key=<key>   - Delete value")
 	log.Println("[Main]   GET    /api/stats              - Get statistics")
-	log.Fatal(http.ListenAndServe(":9999", nil))
+	log.Fatal(http.ListenAndServe(":"+apiPortStr, nil))
 }
 
 func handleGracefulShutdown(sd *discovery.ServiceDiscovery, peers *jincache.HTTPPool) {
@@ -256,7 +257,7 @@ func main() {
 
 	// 启动API服务器（如果需要）
 	if config.API {
-		startAPIServer(config.APIAddr, jin)
+		startAPIServer(config.Port, jin)
 		return
 	}
 

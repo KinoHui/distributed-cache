@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"go.etcd.io/etcd/client/v3"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -26,10 +26,10 @@ const (
 type Client struct {
 	etcdClient *clientv3.Client
 	groupName  string
-	nodes      []string      // 节点列表缓存
-	nodeIndex  int           // 轮询索引
-	mu         sync.RWMutex  // 保护 node 列表
-	lastUpdate time.Time     // 最后更新时间
+	nodes      []string     // 节点列表缓存
+	nodeIndex  int          // 轮询索引
+	mu         sync.RWMutex // 保护 node 列表
+	lastUpdate time.Time    // 最后更新时间
 	httpClient *http.Client
 }
 

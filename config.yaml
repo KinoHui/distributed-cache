@@ -1,0 +1,27 @@
+# JinCache 分布式缓存系统配置文件
+
+# 服务器配置
+port: 8001                    # 服务端口
+ip: "localhost"               # 服务IP地址
+api: false                    # 是否启动API服务器
+
+# 缓存配置
+group_name: "default-group"   # 缓存组名称
+cache_bytes: 2048             # 缓存大小（字节），默认2KB
+enable_getter: false           # 是否启用数据源加载
+
+# etcd 配置
+etcd_endpoints:
+  - "http://192.168.59.132:2379"  # etcd端点列表
+etcd_dial_timeout: 5          # etcd连接超时（秒）
+
+# 服务发现配置
+node_id: ""                   # 节点ID（留空自动生成，格式：node-{port}）
+lease_ttl: 30                 # 租约TTL（秒）
+heartbeat_interval: 10        # 心跳间隔（秒）
+
+# HTTP 客户端配置
+http_timeout: 5               # HTTP请求超时（秒）
+
+# 日志配置
+log_level: "info"             # 日志级别：debug, info, warn, error

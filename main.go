@@ -13,7 +13,10 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
+
+	"gopkg.in/yaml.v3"
 )
 
 var db = map[string]string{
@@ -23,17 +26,49 @@ var db = map[string]string{
 	"Sam": "567",
 }
 
+// 命令行参数变量
+var (
+	configPort         int
+	configIP           string
+	configAPI          bool
+	configGroupName    string
+	configEnableGetter bool
+	configCacheBytes   int
+	configNodeID       string
+	configLeaseTTL     int
+	configHTTPTimeout  int
+	configLogLevel     string
+)
+
 // Config 配置结构
 type Config struct {
-	Port         int
-	IP           string
-	API          bool
-	EtcdEndpts   []string
-	GroupName    string
-	EnableGetter bool
+	// 服务器配置
+	Port int    `yaml:"port" json:"port"`
+	IP   string `yaml:"ip" json:"ip"`
+	API  bool   `yaml:"api" json:"api"`
+
+	// 缓存配置
+	GroupName    string `yaml:"group_name" json:"group_name"`
+	CacheBytes   int64  `yaml:"cache_bytes" json:"cache_bytes"`   // 缓存大小（字节）
+	EnableGetter bool   `yaml:"enable_getter" json:"enable_getter"`
+
+	// etcd 配置
+	EtcdEndpoints []string `yaml:"etcd_endpoints" json:"etcd_endpoints"`
+	EtcdDialTimeout int    `yaml:"etcd_dial_timeout" json:"etcd_dial_timeout"` // etcd 连接超时（秒）
+
+	// 服务发现配置
+	NodeID          string `yaml:"node_id" json:"node_id"`                   // 节点ID（留空自动生成）
+	LeaseTTL        int    `yaml:"lease_ttl" json:"lease_ttl"`               // 租约TTL（秒）
+	HeartbeatInterval int  `yaml:"heartbeat_interval" json:"heartbeat_interval"` // 心跳间隔（秒）
+
+	// HTTP 客户端配置
+	HTTPTimeout int `yaml:"http_timeout" json:"http_timeout"` // HTTP 请求超时（秒）
+
+	// 日志配置
+	LogLevel string `yaml:"log_level" json:"log_level"` // 日志级别：debug, info, warn, error
 }
 
-func createGroup(groupName string, enableGetter bool) (*jincache.Group, string) {
+func createGroup(groupName string, enableGetter bool, cacheBytes int64) (*jincache.Group, string) {
 	var getter jincache.Getter
 	if enableGetter {
 		getter = jincache.GetterFunc(
@@ -45,16 +80,16 @@ func createGroup(groupName string, enableGetter bool) (*jincache.Group, string) 
 				return nil, fmt.Errorf("%s not exist", key)
 			})
 	}
-	return jincache.NewGroup(groupName, 2<<10, getter), groupName
+	return jincache.NewGroup(groupName, cacheBytes, getter), groupName
 }
 
 func startCacheServer(config *Config, jin *jincache.Group, groupName string) {
 	// 构建节点地址
 	nodeAddr := fmt.Sprintf("http://%s:%d", config.IP, config.Port)
-	nodeID := fmt.Sprintf("node-%d", config.Port)
+	nodeID := config.NodeID
 
 	// 创建服务发现，指定group名称
-	sd, err := discovery.NewServiceDiscovery(config.EtcdEndpts, nodeID, nodeAddr, groupName)
+	sd, err := discovery.NewServiceDiscovery(config.EtcdEndpoints, nodeID, nodeAddr, groupName)
 	if err != nil {
 		log.Fatalf("Failed to create service discovery: %v", err)
 	}
@@ -79,7 +114,7 @@ func startCacheServer(config *Config, jin *jincache.Group, groupName string) {
 	jin.RegisterPeers(peers)
 
 	log.Printf("[Main] Cache server %s is running at %s", nodeID, nodeAddr)
-	log.Printf("[Main] Etcd endpoints: %v", config.EtcdEndpts)
+	log.Printf("[Main] Etcd endpoints: %v", config.EtcdEndpoints)
 
 	// 设置优雅关闭
 	go handleGracefulShutdown(sd, peers)
@@ -228,39 +263,192 @@ func handleGracefulShutdown(sd *discovery.ServiceDiscovery, peers *jincache.HTTP
 	os.Exit(0)
 }
 
+// loadConfigFromFile 从 YAML 文件加载配置
+func loadConfigFromFile(filename string) (*Config, error) {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %v", err)
+	}
+
+	var config Config
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("failed to parse config file: %v", err)
+	}
+
+	// 设置默认值
+	setConfigDefaults(&config)
+
+	return &config, nil
+}
+
+// setConfigDefaults 设置配置的默认值
+func setConfigDefaults(config *Config) {
+	if config.Port == 0 {
+		config.Port = 8001
+	}
+	if config.IP == "" {
+		config.IP = "localhost"
+	}
+	if config.GroupName == "" {
+		config.GroupName = "default-group"
+	}
+	if config.CacheBytes == 0 {
+		config.CacheBytes = 2 << 10 // 2KB
+	}
+	if len(config.EtcdEndpoints) == 0 {
+		config.EtcdEndpoints = []string{"http://192.168.59.132:2379"}
+	}
+	if config.EtcdDialTimeout == 0 {
+		config.EtcdDialTimeout = 5
+	}
+	if config.LeaseTTL == 0 {
+		config.LeaseTTL = 30
+	}
+	if config.HeartbeatInterval == 0 {
+		config.HeartbeatInterval = 10
+	}
+	if config.HTTPTimeout == 0 {
+		config.HTTPTimeout = 5
+	}
+	if config.LogLevel == "" {
+		config.LogLevel = "info"
+	}
+}
+
+// parseConfig 解析配置（配置文件 + 命令行参数）
 func parseConfig() *Config {
-	config := &Config{}
-
-	flag.IntVar(&config.Port, "port", 8001, "jincache server port")
-	flag.StringVar(&config.IP, "ip", "localhost", "jincache server ip")
-	flag.BoolVar(&config.API, "api", false, "Start a api server?")
-	flag.StringVar(&config.GroupName, "groupname", "default-group", "cache group name")
-	flag.BoolVar(&config.EnableGetter, "enableGetter", false, "enable getter for loading data from source")
-
-	// 解析etcd端点
+	var configFile string
 	var etcdEndpoints string
-	flag.StringVar(&etcdEndpoints, "etcd", "192.168.59.132:2379", "etcd endpoints (comma separated)")
+
+	// 定义命令行参数
+	flag.StringVar(&configFile, "config", "", "path to config file (yaml)")
+	flag.IntVar(&configPort, "port", 0, "jincache server port")
+	flag.StringVar(&configIP, "ip", "", "jincache server ip")
+	flag.BoolVar(&configAPI, "api", false, "Start a api server?")
+	flag.StringVar(&configGroupName, "groupname", "", "cache group name")
+	flag.BoolVar(&configEnableGetter, "enableGetter", false, "enable getter for loading data from source")
+	flag.StringVar(&etcdEndpoints, "etcd", "", "etcd endpoints (comma separated)")
+	flag.IntVar(&configCacheBytes, "cacheBytes", 0, "cache size in bytes")
+	flag.StringVar(&configNodeID, "nodeID", "", "node ID")
+	flag.IntVar(&configLeaseTTL, "leaseTTL", 0, "lease TTL in seconds")
+	flag.IntVar(&configHTTPTimeout, "httpTimeout", 0, "HTTP timeout in seconds")
+	flag.StringVar(&configLogLevel, "logLevel", "", "log level (debug, info, warn, error)")
+
 	flag.Parse()
 
-	// 解析etcd端点列表
-	if etcdEndpoints != "" {
-		config.EtcdEndpts = []string{"http://" + etcdEndpoints}
+	// 从配置文件加载
+	var config *Config
+	if configFile != "" {
+		var err error
+		config, err = loadConfigFromFile(configFile)
+		if err != nil {
+			log.Fatalf("Failed to load config file: %v", err)
+		}
+		log.Printf("[Config] Loaded config from file: %s", configFile)
 	} else {
-		config.EtcdEndpts = []string{"http://192.168.59.132:2379"} // 默认值
+		config = &Config{}
+		setConfigDefaults(config)
+	}
+
+	// 命令行参数覆盖配置文件
+	if configPort != 0 {
+		config.Port = configPort
+	}
+	if configIP != "" {
+		config.IP = configIP
+	}
+	if configAPI {
+		config.API = configAPI
+	}
+	if configGroupName != "" {
+		config.GroupName = configGroupName
+	}
+	if configEnableGetter {
+		config.EnableGetter = configEnableGetter
+	}
+	if etcdEndpoints != "" {
+		// 解析逗号分隔的 etcd 端点
+		endpoints := splitEndpoints(etcdEndpoints)
+		// 确保每个端点都有 http:// 前缀
+		config.EtcdEndpoints = normalizeEndpoints(endpoints)
+	}
+	if configCacheBytes != 0 {
+		config.CacheBytes = int64(configCacheBytes)
+	}
+	if configNodeID != "" {
+		config.NodeID = configNodeID
+	}
+	if configLeaseTTL != 0 {
+		config.LeaseTTL = configLeaseTTL
+	}
+	if configHTTPTimeout != 0 {
+		config.HTTPTimeout = configHTTPTimeout
+	}
+	if configLogLevel != "" {
+		config.LogLevel = configLogLevel
+	}
+
+	// 生成默认节点ID
+	if config.NodeID == "" {
+		config.NodeID = fmt.Sprintf("node-%d", config.Port)
 	}
 
 	return config
 }
 
+// splitEndpoints 分割逗号分隔的端点列表
+func splitEndpoints(endpoints string) []string {
+	if endpoints == "" {
+		return nil
+	}
+	var result []string
+	for _, ep := range strings.Split(endpoints, ",") {
+		ep = strings.TrimSpace(ep)
+		if ep != "" {
+			result = append(result, ep)
+		}
+	}
+	return result
+}
+
+// normalizeEndpoints 规范化端点列表，确保每个端点都有 http:// 或 https:// 前缀
+func normalizeEndpoints(endpoints []string) []string {
+	if endpoints == nil {
+		return nil
+	}
+	result := make([]string, len(endpoints))
+	for i, ep := range endpoints {
+		if !strings.HasPrefix(ep, "http://") && !strings.HasPrefix(ep, "https://") {
+			result[i] = "http://" + ep
+		} else {
+			result[i] = ep
+		}
+	}
+	return result
+}
+
 func main() {
 	config := parseConfig()
 
+	// 输出配置信息
+	log.Printf("[Config] Port: %d", config.Port)
+	log.Printf("[Config] IP: %s", config.IP)
+	log.Printf("[Config] API: %v", config.API)
+	log.Printf("[Config] GroupName: %s", config.GroupName)
+	log.Printf("[Config] CacheBytes: %d", config.CacheBytes)
+	log.Printf("[Config] EnableGetter: %v", config.EnableGetter)
+	log.Printf("[Config] EtcdEndpoints: %v", config.EtcdEndpoints)
+	log.Printf("[Config] NodeID: %s", config.NodeID)
+	log.Printf("[Config] LeaseTTL: %d", config.LeaseTTL)
+	log.Printf("[Config] HTTPTimeout: %d", config.HTTPTimeout)
+	log.Printf("[Config] LogLevel: %s", config.LogLevel)
+
 	// 创建缓存组
-	jin, groupName := createGroup(config.GroupName, config.EnableGetter)
+	jin, groupName := createGroup(config.GroupName, config.EnableGetter, config.CacheBytes)
 
 	// 启动API服务器（如果需要）
 	if config.API {
-		startAPIServer(config.Port, jin, config.EtcdEndpts, config.GroupName)
+		startAPIServer(config.Port, jin, config.EtcdEndpoints, config.GroupName)
 		return
 	}
 

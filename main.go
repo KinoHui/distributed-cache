@@ -26,8 +26,8 @@ var db = map[string]string{
 // Config 配置结构
 type Config struct {
 	Port         int
+	IP           string
 	API          bool
-	APIAddr      string
 	EtcdEndpts   []string
 	GroupName    string
 	EnableGetter bool
@@ -50,7 +50,7 @@ func createGroup(groupName string, enableGetter bool) (*jincache.Group, string) 
 
 func startCacheServer(config *Config, jin *jincache.Group, groupName string) {
 	// 构建节点地址
-	nodeAddr := fmt.Sprintf("http://localhost:%d", config.Port)
+	nodeAddr := fmt.Sprintf("http://%s:%d", config.IP, config.Port)
 	nodeID := fmt.Sprintf("node-%d", config.Port)
 
 	// 创建服务发现，指定group名称
@@ -87,9 +87,13 @@ func startCacheServer(config *Config, jin *jincache.Group, groupName string) {
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", config.Port), peers))
 }
 
-func startAPIServer(apiPort int, jin *jincache.Group) {
-	// 创建缓存客户端，连接到本地缓存服务器 todo:改为使用etcd信息以及group来获取对应group的信息
-	cacheClient := client.NewClient("http://localhost:8001")
+func startAPIServer(apiPort int, jin *jincache.Group, etcdEndpoints []string, groupName string) {
+	// 创建缓存客户端，基于 etcd 和 group 名称
+	cacheClient, err := client.NewClient(etcdEndpoints, groupName)
+	if err != nil {
+		log.Fatalf("Failed to create cache client: %v", err)
+	}
+	defer cacheClient.Close()
 
 	// GET /api?key=<key> - 获取缓存值
 	http.HandleFunc("/api", func(w http.ResponseWriter, r *http.Request) {
@@ -228,6 +232,7 @@ func parseConfig() *Config {
 	config := &Config{}
 
 	flag.IntVar(&config.Port, "port", 8001, "jincache server port")
+	flag.StringVar(&config.IP, "ip", "localhost", "jincache server ip")
 	flag.BoolVar(&config.API, "api", false, "Start a api server?")
 	flag.StringVar(&config.GroupName, "groupname", "default-group", "cache group name")
 	flag.BoolVar(&config.EnableGetter, "enableGetter", false, "enable getter for loading data from source")
@@ -244,8 +249,6 @@ func parseConfig() *Config {
 		config.EtcdEndpts = []string{"http://192.168.59.132:2379"} // 默认值
 	}
 
-	config.APIAddr = "http://localhost:" + strconv.Itoa(config.Port)
-
 	return config
 }
 
@@ -257,7 +260,7 @@ func main() {
 
 	// 启动API服务器（如果需要）
 	if config.API {
-		startAPIServer(config.Port, jin)
+		startAPIServer(config.Port, jin, config.EtcdEndpts, config.GroupName)
 		return
 	}
 

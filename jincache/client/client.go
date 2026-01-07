@@ -2,6 +2,8 @@ package client
 
 import (
 	"bytes"
+	"context"
+	"distributed-cache-demo/jincache/discovery"
 	"distributed-cache-demo/jincache/jincachepb"
 	"encoding/json"
 	"fmt"
@@ -9,30 +11,172 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
+	"go.etcd.io/etcd/client/v3"
 	"google.golang.org/protobuf/proto"
+)
+
+const (
+	nodeCacheTTL = 30 * time.Second // 节点列表缓存过期时间
 )
 
 // Client 缓存客户端
 type Client struct {
-	baseURL    string
+	etcdClient *clientv3.Client
+	groupName  string
+	nodes      []string      // 节点列表缓存
+	nodeIndex  int           // 轮询索引
+	mu         sync.RWMutex  // 保护 node 列表
+	lastUpdate time.Time     // 最后更新时间
 	httpClient *http.Client
 }
 
-// NewClient 创建新的缓存客户端
-func NewClient(baseURL string) *Client {
+// NewClient 创建新的缓存客户端（基于 etcd 和 group）
+func NewClient(etcdEndpoints []string, groupName string) (*Client, error) {
+	etcdClient, err := clientv3.New(clientv3.Config{
+		Endpoints:   etcdEndpoints,
+		DialTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to etcd: %v", err)
+	}
+
 	return &Client{
-		baseURL: baseURL,
+		etcdClient: etcdClient,
+		groupName:  groupName,
+		httpClient: &http.Client{
+			Timeout: 5 * time.Second,
+		},
+	}, nil
+}
+
+// Deprecated: NewClientWithURL 已弃用，请使用 NewClient
+func NewClientWithURL(baseURL string) *Client {
+	return &Client{
+		etcdClient: nil,
+		groupName:  "",
+		nodes:      []string{baseURL},
+		nodeIndex:  0,
+		lastUpdate: time.Now(),
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
 	}
 }
 
+// refreshNodes 从 etcd 刷新节点列表
+func (c *Client) refreshNodes() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	prefix := fmt.Sprintf("/jincache/groups/%s/nodes/", c.groupName)
+	resp, err := c.etcdClient.Get(ctx, prefix, clientv3.WithPrefix())
+	if err != nil {
+		return fmt.Errorf("failed to get nodes from etcd: %v", err)
+	}
+
+	var nodes []string
+	for _, kv := range resp.Kvs {
+		var nodeInfo discovery.NodeInfo
+		if err := json.Unmarshal(kv.Value, &nodeInfo); err != nil {
+			log.Printf("[Client] Failed to unmarshal node info: %v", err)
+			continue
+		}
+		nodes = append(nodes, nodeInfo.Address)
+	}
+
+	if len(nodes) == 0 {
+		return fmt.Errorf("no available nodes for group %s", c.groupName)
+	}
+
+	c.mu.Lock()
+	c.nodes = nodes
+	c.nodeIndex = 0
+	c.lastUpdate = time.Now()
+	c.mu.Unlock()
+
+	log.Printf("[Client] Refreshed node list for group %s: %v", c.groupName, nodes)
+	return nil
+}
+
+// getNodes 获取节点列表，如果过期则刷新
+func (c *Client) getNodes() ([]string, error) {
+	c.mu.RLock()
+	needRefresh := len(c.nodes) == 0 || time.Since(c.lastUpdate) > nodeCacheTTL
+	c.mu.RUnlock()
+
+	if needRefresh {
+		if err := c.refreshNodes(); err != nil {
+			return nil, err
+		}
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.nodes, nil
+}
+
+// selectNode 使用轮询算法选择节点
+func (c *Client) selectNode() (string, error) {
+	nodes, err := c.getNodes()
+	if err != nil {
+		return "", err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	node := nodes[c.nodeIndex]
+	c.nodeIndex = (c.nodeIndex + 1) % len(nodes)
+	return node, nil
+}
+
 // Get 获取缓存值
 func (c *Client) Get(group, key string) ([]byte, error) {
-	u := fmt.Sprintf("%s/_jincache/%s/%s", c.baseURL, url.QueryEscape(group), url.QueryEscape(key))
+	// 第一次尝试
+	node, err := c.selectNode()
+	if err != nil {
+		return nil, err
+	}
+
+	value, err := c.doGet(node, group, key)
+	if err == nil {
+		return value, nil
+	}
+
+	log.Printf("[Client] First attempt failed: %v, retrying with next node", err)
+
+	// 第二次尝试：重试下一个节点
+	node, err = c.selectNode()
+	if err != nil {
+		return nil, err
+	}
+
+	value, err = c.doGet(node, group, key)
+	if err == nil {
+		return value, nil
+	}
+
+	log.Printf("[Client] Second attempt failed: %v, refreshing node list and retrying", err)
+
+	// 第三次尝试：刷新节点列表后再次请求
+	if err := c.refreshNodes(); err != nil {
+		return nil, fmt.Errorf("failed to refresh nodes: %v", err)
+	}
+
+	node, err = c.selectNode()
+	if err != nil {
+		return nil, err
+	}
+
+	return c.doGet(node, group, key)
+}
+
+// doGet 执行实际的 GET 请求
+func (c *Client) doGet(baseURL, group, key string) ([]byte, error) {
+	u := fmt.Sprintf("%s/_jincache/%s/%s", baseURL, url.QueryEscape(group), url.QueryEscape(key))
 
 	log.Printf("[Client] GET %s", u)
 
@@ -65,7 +209,48 @@ func (c *Client) Get(group, key string) ([]byte, error) {
 
 // Set 设置缓存值
 func (c *Client) Set(group, key string, value []byte) error {
-	u := fmt.Sprintf("%s/_jincache/%s/%s", c.baseURL, url.QueryEscape(group), url.QueryEscape(key))
+	// 第一次尝试
+	node, err := c.selectNode()
+	if err != nil {
+		return err
+	}
+
+	err = c.doSet(node, group, key, value)
+	if err == nil {
+		return nil
+	}
+
+	log.Printf("[Client] First attempt failed: %v, retrying with next node", err)
+
+	// 第二次尝试：重试下一个节点
+	node, err = c.selectNode()
+	if err != nil {
+		return err
+	}
+
+	err = c.doSet(node, group, key, value)
+	if err == nil {
+		return nil
+	}
+
+	log.Printf("[Client] Second attempt failed: %v, refreshing node list and retrying", err)
+
+	// 第三次尝试：刷新节点列表后再次请求
+	if err := c.refreshNodes(); err != nil {
+		return fmt.Errorf("failed to refresh nodes: %v", err)
+	}
+
+	node, err = c.selectNode()
+	if err != nil {
+		return err
+	}
+
+	return c.doSet(node, group, key, value)
+}
+
+// doSet 执行实际的 SET 请求
+func (c *Client) doSet(baseURL, group, key string, value []byte) error {
+	u := fmt.Sprintf("%s/_jincache/%s/%s", baseURL, url.QueryEscape(group), url.QueryEscape(key))
 
 	req := &jincachepb.Request{
 		Group: group,
@@ -101,7 +286,48 @@ func (c *Client) Set(group, key string, value []byte) error {
 
 // Delete 删除缓存值
 func (c *Client) Delete(group, key string) error {
-	u := fmt.Sprintf("%s/_jincache/%s/%s", c.baseURL, url.QueryEscape(group), url.QueryEscape(key))
+	// 第一次尝试
+	node, err := c.selectNode()
+	if err != nil {
+		return err
+	}
+
+	err = c.doDelete(node, group, key)
+	if err == nil {
+		return nil
+	}
+
+	log.Printf("[Client] First attempt failed: %v, retrying with next node", err)
+
+	// 第二次尝试：重试下一个节点
+	node, err = c.selectNode()
+	if err != nil {
+		return err
+	}
+
+	err = c.doDelete(node, group, key)
+	if err == nil {
+		return nil
+	}
+
+	log.Printf("[Client] Second attempt failed: %v, refreshing node list and retrying", err)
+
+	// 第三次尝试：刷新节点列表后再次请求
+	if err := c.refreshNodes(); err != nil {
+		return fmt.Errorf("failed to refresh nodes: %v", err)
+	}
+
+	node, err = c.selectNode()
+	if err != nil {
+		return err
+	}
+
+	return c.doDelete(node, group, key)
+}
+
+// doDelete 执行实际的 DELETE 请求
+func (c *Client) doDelete(baseURL, group, key string) error {
+	u := fmt.Sprintf("%s/_jincache/%s/%s", baseURL, url.QueryEscape(group), url.QueryEscape(key))
 
 	log.Printf("[Client] DELETE %s", u)
 
@@ -135,7 +361,48 @@ type StatsResponse struct {
 
 // GetStats 获取缓存统计信息
 func (c *Client) GetStats(group string) (*StatsResponse, error) {
-	u := fmt.Sprintf("%s/_jincache/%s/_stats", c.baseURL, url.QueryEscape(group))
+	// 第一次尝试
+	node, err := c.selectNode()
+	if err != nil {
+		return nil, err
+	}
+
+	stats, err := c.doGetStats(node, group)
+	if err == nil {
+		return stats, nil
+	}
+
+	log.Printf("[Client] First attempt failed: %v, retrying with next node", err)
+
+	// 第二次尝试：重试下一个节点
+	node, err = c.selectNode()
+	if err != nil {
+		return nil, err
+	}
+
+	stats, err = c.doGetStats(node, group)
+	if err == nil {
+		return stats, nil
+	}
+
+	log.Printf("[Client] Second attempt failed: %v, refreshing node list and retrying", err)
+
+	// 第三次尝试：刷新节点列表后再次请求
+	if err := c.refreshNodes(); err != nil {
+		return nil, fmt.Errorf("failed to refresh nodes: %v", err)
+	}
+
+	node, err = c.selectNode()
+	if err != nil {
+		return nil, err
+	}
+
+	return c.doGetStats(node, group)
+}
+
+// doGetStats 执行实际的 GetStats 请求
+func (c *Client) doGetStats(baseURL, group string) (*StatsResponse, error) {
+	u := fmt.Sprintf("%s/_jincache/%s/_stats", baseURL, url.QueryEscape(group))
 
 	log.Printf("[Client] GET %s", u)
 
@@ -160,4 +427,12 @@ func (c *Client) GetStats(group string) (*StatsResponse, error) {
 	}
 
 	return &stats, nil
+}
+
+// Close 关闭客户端
+func (c *Client) Close() error {
+	if c.etcdClient != nil {
+		return c.etcdClient.Close()
+	}
+	return nil
 }

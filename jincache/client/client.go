@@ -146,7 +146,7 @@ func (c *Client) Get(group, key string) ([]byte, error) {
 		return value, nil
 	}
 
-	log.Printf("[Client] First attempt failed: %v, retrying with next node", err)
+	log.Printf("[Client] Get failed (attempt 1): key=%s, error=%v, retrying", key, err)
 
 	// 第二次尝试：重试下一个节点
 	node, err = c.selectNode()
@@ -159,7 +159,7 @@ func (c *Client) Get(group, key string) ([]byte, error) {
 		return value, nil
 	}
 
-	log.Printf("[Client] Second attempt failed: %v, refreshing node list and retrying", err)
+	log.Printf("[Client] Get failed (attempt 2): key=%s, error=%v, refreshing nodes", key, err)
 
 	// 第三次尝试：刷新节点列表后再次请求
 	if err := c.refreshNodes(); err != nil {
@@ -220,7 +220,7 @@ func (c *Client) Set(group, key string, value []byte) error {
 		return nil
 	}
 
-	log.Printf("[Client] First attempt failed: %v, retrying with next node", err)
+	log.Printf("[Client] Set failed (attempt 1): key=%s, error=%v, retrying", key, err)
 
 	// 第二次尝试：重试下一个节点
 	node, err = c.selectNode()
@@ -233,7 +233,7 @@ func (c *Client) Set(group, key string, value []byte) error {
 		return nil
 	}
 
-	log.Printf("[Client] Second attempt failed: %v, refreshing node list and retrying", err)
+	log.Printf("[Client] Set failed (attempt 2): key=%s, error=%v, refreshing nodes", key, err)
 
 	// 第三次尝试：刷新节点列表后再次请求
 	if err := c.refreshNodes(); err != nil {
@@ -297,7 +297,7 @@ func (c *Client) Delete(group, key string) error {
 		return nil
 	}
 
-	log.Printf("[Client] First attempt failed: %v, retrying with next node", err)
+	log.Printf("[Client] Delete failed (attempt 1): key=%s, error=%v, retrying", key, err)
 
 	// 第二次尝试：重试下一个节点
 	node, err = c.selectNode()
@@ -310,7 +310,7 @@ func (c *Client) Delete(group, key string) error {
 		return nil
 	}
 
-	log.Printf("[Client] Second attempt failed: %v, refreshing node list and retrying", err)
+	log.Printf("[Client] Delete failed (attempt 2): key=%s, error=%v, refreshing nodes", key, err)
 
 	// 第三次尝试：刷新节点列表后再次请求
 	if err := c.refreshNodes(); err != nil {
@@ -375,7 +375,7 @@ func (c *Client) GetStats(group string) (*StatsResponse, error) {
 		return nil, fmt.Errorf("no available nodes for group %s", group)
 	}
 
-	log.Printf("[Client] Getting stats from %d nodes for group %s", len(nodes), group)
+	log.Printf("[Client] Getting stats from %d nodes", len(nodes))
 
 	// 并发获取所有节点的统计信息
 	type nodeStats struct {
@@ -418,11 +418,11 @@ func (c *Client) GetStats(group string) (*StatsResponse, error) {
 		totalKeysCount += ns.stats.KeysCount
 		totalBytesUsed += ns.stats.BytesUsed
 		successCount++
-		log.Printf("[Client] Got stats from node %s: keys=%d, bytes=%d",
+		log.Printf("[Client] Stats from node %s: keys=%d, bytes=%d",
 			ns.node, ns.stats.KeysCount, ns.stats.BytesUsed)
 	}
 
-	log.Printf("[Client] Stats aggregation completed: %d nodes succeeded, %d nodes failed",
+	log.Printf("[Client] Stats aggregation: %d succeeded, %d failed",
 		successCount, len(failedNodes))
 
 	if successCount == 0 {

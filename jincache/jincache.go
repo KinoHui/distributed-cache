@@ -79,7 +79,7 @@ func (g *Group) Get(key string) (ByteView, error) {
 	if g.peers != nil {
 		if peer, ok := g.peers.PickPeer(key); ok {
 			// key应该路由到其他节点，转发请求
-			log.Printf("[JinCache] Routing key %s to peer", key)
+			log.Printf("[JinCache] Routing key=%s to peer", key)
 			return g.getFromPeer(peer, key)
 		}
 		// PickPeer返回false表示key应该路由到当前节点
@@ -87,7 +87,7 @@ func (g *Group) Get(key string) (ByteView, error) {
 
 	// key应该路由到当前节点，查本地缓存
 	if v, ok := g.mainCache.get(key); ok {
-		log.Println("[JinCache] hit")
+		log.Printf("[JinCache] Cache hit: key=%s", key)
 		return v, nil
 	}
 
@@ -196,7 +196,7 @@ func (g *Group) Set(key string, value ByteView) error {
 	if g.peers != nil {
 		if peer, ok := g.peers.PickPeer(key); ok {
 			// key应该路由到其他节点，转发请求
-			log.Printf("[JinCache] Routing set key %s to peer", key)
+			log.Printf("[JinCache] Routing set key=%s to peer", key)
 			return g.setToPeer(peer, key, value)
 		}
 		// PickPeer返回false表示key应该路由到当前节点
@@ -204,7 +204,7 @@ func (g *Group) Set(key string, value ByteView) error {
 
 	// key应该路由到当前节点，直接设置本地缓存
 	g.populateCache(key, value)
-	log.Println("[JinCache] set key to local cache")
+	log.Printf("[JinCache] Set key=%s to local cache", key)
 	return nil
 }
 
@@ -218,7 +218,7 @@ func (g *Group) Delete(key string) error {
 	if g.peers != nil {
 		if peer, ok := g.peers.PickPeer(key); ok {
 			// key应该路由到其他节点，转发请求
-			log.Printf("[JinCache] Routing delete key %s to peer", key)
+			log.Printf("[JinCache] Routing delete key=%s to peer", key)
 			return g.deleteFromPeer(peer, key)
 		}
 		// PickPeer返回false表示key应该路由到当前节点
@@ -226,7 +226,7 @@ func (g *Group) Delete(key string) error {
 
 	// key应该路由到当前节点，直接删除本地缓存
 	g.mainCache.Remove(key)
-	log.Println("[JinCache] delete key from local cache")
+	log.Printf("[JinCache] Delete key=%s from local cache", key)
 	return nil
 }
 

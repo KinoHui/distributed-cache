@@ -1,7 +1,7 @@
 # JinCache 分布式缓存系统配置文件
 
 # 服务器配置
-port: 8002                    # 服务端口
+port: 8001                 # 服务端口
 ip: "localhost"               # 服务IP地址
 api: false                    # 是否启动API服务器
 

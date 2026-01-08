@@ -73,7 +73,7 @@ func createGroup(groupName string, enableGetter bool, cacheBytes int64) (*jincac
 	if enableGetter {
 		getter = jincache.GetterFunc(
 			func(key string) ([]byte, error) {
-				log.Println("[SlowDB] search key", key)
+				log.Printf("[SlowDB] Loading key: %s", key)
 				if v, ok := db[key]; ok {
 					return []byte(v), nil
 				}
@@ -91,42 +91,39 @@ func startCacheServer(config *Config, jin *jincache.Group, groupName string) {
 	// 创建服务发现，指定group名称
 	sd, err := discovery.NewServiceDiscovery(config.EtcdEndpoints, nodeID, nodeAddr, groupName)
 	if err != nil {
-		log.Fatalf("Failed to create service discovery: %v", err)
+		log.Fatalf("[Main] Failed to create service discovery: %v", err)
 	}
 
 	// 注册服务
 	if err := sd.Register(); err != nil {
-		log.Fatalf("Failed to register service: %v", err)
+		log.Fatalf("[Main] Failed to register service: %v", err)
 	}
 
 	// 创建增强的HTTP池
-	// hashFunc := func(data []byte) uint32 {
-	// 	fmt.Println("######node name: " + string(data))
-	// 	if len(data) > 1 {
-	// 		fmt.Println("######hashed result: ", uint32(data[1]))
-	// 		return uint32(data[1])
-	// 	} else {
-	// 		fmt.Println("######hashed result: ", uint32(data[0]))
-	// 		return uint32(data[0])
-	// 	}
-	// }
 	peers := jincache.NewEnhancedHTTPPool(nodeAddr, sd, jin)
 	jin.RegisterPeers(peers)
 
-	log.Printf("[Main] Cache server %s is running at %s", nodeID, nodeAddr)
+	log.Printf("[Main] Starting cache server...")
+	log.Printf("[Main] Node ID: %s", nodeID)
+	log.Printf("[Main] Address: %s", nodeAddr)
+	log.Printf("[Main] Group: %s", groupName)
+	log.Printf("[Main] Cache size: %d bytes", config.CacheBytes)
 	log.Printf("[Main] Etcd endpoints: %v", config.EtcdEndpoints)
 
 	// 设置优雅关闭
 	go handleGracefulShutdown(sd, peers)
 
-	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", config.Port), peers))
+	// 启动HTTP服务
+	addr := fmt.Sprintf(":%d", config.Port)
+	log.Printf("[Main] ✓ Cache server started successfully on %s", addr)
+	log.Fatal(http.ListenAndServe(addr, peers))
 }
 
 func startAPIServer(apiPort int, jin *jincache.Group, etcdEndpoints []string, groupName string) {
 	// 创建缓存客户端，基于 etcd 和 group 名称
 	cacheClient, err := client.NewClient(etcdEndpoints, groupName)
 	if err != nil {
-		log.Fatalf("Failed to create cache client: %v", err)
+		log.Fatalf("[Main] Failed to create cache client: %v", err)
 	}
 	defer cacheClient.Close()
 
@@ -230,12 +227,16 @@ func startAPIServer(apiPort int, jin *jincache.Group, etcdEndpoints []string, gr
 	})
 
 	apiPortStr := strconv.Itoa(apiPort)
-	log.Println("[Main] API server is running at", apiPortStr)
+	log.Printf("[Main] Starting API server...")
+	log.Printf("[Main] Port: %s", apiPortStr)
+	log.Printf("[Main] Group: %s", groupName)
+	log.Printf("[Main] Etcd endpoints: %v", etcdEndpoints)
 	log.Println("[Main] Available endpoints:")
 	log.Println("[Main]   GET    /api?key=<key>          - Get value")
 	log.Println("[Main]   POST   /api/set?key=<key>      - Set value")
 	log.Println("[Main]   DELETE /api/delete?key=<key>   - Delete value")
 	log.Println("[Main]   GET    /api/stats              - Get statistics")
+	log.Printf("[Main] ✓ API server started successfully on port %s", apiPortStr)
 	log.Fatal(http.ListenAndServe(":"+apiPortStr, nil))
 }
 
@@ -259,7 +260,7 @@ func handleGracefulShutdown(sd *discovery.ServiceDiscovery, peers *jincache.HTTP
 		log.Printf("[Main] Failed to close service discovery: %v", err)
 	}
 
-	log.Println("[Main] Shutdown complete")
+	log.Println("[Main] ✓ Shutdown complete")
 	os.Exit(0)
 }
 
@@ -431,17 +432,21 @@ func main() {
 	config := parseConfig()
 
 	// 输出配置信息
+	log.Println("========================================")
+	log.Println("JinCache Distributed Cache System")
+	log.Println("========================================")
 	log.Printf("[Config] Port: %d", config.Port)
 	log.Printf("[Config] IP: %s", config.IP)
 	log.Printf("[Config] API: %v", config.API)
-	log.Printf("[Config] GroupName: %s", config.GroupName)
-	log.Printf("[Config] CacheBytes: %d", config.CacheBytes)
-	log.Printf("[Config] EnableGetter: %v", config.EnableGetter)
-	log.Printf("[Config] EtcdEndpoints: %v", config.EtcdEndpoints)
-	log.Printf("[Config] NodeID: %s", config.NodeID)
-	log.Printf("[Config] LeaseTTL: %d", config.LeaseTTL)
-	log.Printf("[Config] HTTPTimeout: %d", config.HTTPTimeout)
-	log.Printf("[Config] LogLevel: %s", config.LogLevel)
+	log.Printf("[Config] Group: %s", config.GroupName)
+	log.Printf("[Config] Cache size: %d bytes", config.CacheBytes)
+	log.Printf("[Config] Enable getter: %v", config.EnableGetter)
+	log.Printf("[Config] Etcd: %v", config.EtcdEndpoints)
+	log.Printf("[Config] Node ID: %s", config.NodeID)
+	log.Printf("[Config] Lease TTL: %d seconds", config.LeaseTTL)
+	log.Printf("[Config] HTTP timeout: %d seconds", config.HTTPTimeout)
+	log.Printf("[Config] Log level: %s", config.LogLevel)
+	log.Println("========================================")
 
 	// 创建缓存组
 	jin, groupName := createGroup(config.GroupName, config.EnableGetter, config.CacheBytes)

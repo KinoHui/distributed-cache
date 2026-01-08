@@ -78,7 +78,7 @@ func (nh *nodeHealth) recordFailure(nodeAddr string) {
 	// 超过最大失败次数，加入黑名单
 	if nh.failures[nodeAddr] >= nh.maxFailures {
 		nh.blacklist[nodeAddr] = time.Now()
-		log.Printf("[NodeHealth] Node %s added to blacklist (failures: %d)",
+		log.Printf("[NodeHealth] Node %s added to blacklist (failures=%d)",
 			nodeAddr, nh.failures[nodeAddr])
 	}
 }
@@ -92,7 +92,7 @@ func (nh *nodeHealth) recordSuccess(nodeAddr string) {
 	if nh.failures[nodeAddr] > 0 {
 		delete(nh.failures, nodeAddr)
 		delete(nh.lastFailure, nodeAddr)
-		log.Printf("[NodeHealth] Node %s recovered, resetting failure count", nodeAddr)
+		log.Printf("[NodeHealth] Node %s recovered", nodeAddr)
 	}
 
 	// 从黑名单中移除
@@ -215,8 +215,6 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("[ServeHTTP] Processing request for group: %s, key: %s", groupName, key)
-
 	group := GetGroup(groupName)
 	if group == nil {
 		log.Printf("[ServeHTTP] No such group: %s", groupName)
@@ -240,11 +238,11 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // handleGetRequest 处理GET请求
 func (p *HTTPPool) handleGetRequest(w http.ResponseWriter, r *http.Request, group *Group, key string) {
 	// 对于来自其他节点的请求，使用GetRemote方法避免循环转发
-	log.Printf("[ServeHTTP] Remote GET request, using Group.GetRemote")
+	log.Printf("[ServeHTTP] GET key=%s", key)
 
 	view, err := group.Get(key)
 	if err != nil {
-		log.Printf("[ServeHTTP] Failed to get key %s: %v", key, err)
+		log.Printf("[ServeHTTP] Failed to get key=%s: %v", key, err)
 		// 判断是否是key不存在的错误
 		if err == KeyNotFoundError {
 			http.Error(w, "key not found: "+key, http.StatusNotFound)
@@ -261,14 +259,13 @@ func (p *HTTPPool) handleGetRequest(w http.ResponseWriter, r *http.Request, grou
 		return
 	}
 
-	log.Printf("[ServeHTTP] Successfully returning value for key: %s", key)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Write(body)
 }
 
 // handleSetRequest 处理PUT请求
 func (p *HTTPPool) handleSetRequest(w http.ResponseWriter, r *http.Request, group *Group, key string) {
-	log.Printf("[ServeHTTP] Processing SET request for key: %s", key)
+	log.Printf("[ServeHTTP] SET key=%s", key)
 
 	// 读取请求体
 	body, err := io.ReadAll(r.Body)
@@ -290,28 +287,26 @@ func (p *HTTPPool) handleSetRequest(w http.ResponseWriter, r *http.Request, grou
 	// 调用 group.Set 方法，内部会通过一致性哈希判断应该路由到哪个节点
 	err = group.Set(key, ByteView{b: req.Value})
 	if err != nil {
-		log.Printf("[ServeHTTP] Failed to set key %s: %v", key, err)
+		log.Printf("[ServeHTTP] Failed to set key=%s: %v", key, err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	log.Printf("[ServeHTTP] Successfully set value for key: %s", key)
 	w.WriteHeader(http.StatusOK)
 }
 
 // handleDeleteRequest 处理DELETE请求
 func (p *HTTPPool) handleDeleteRequest(w http.ResponseWriter, r *http.Request, group *Group, key string) {
-	log.Printf("[ServeHTTP] Processing DELETE request for key: %s", key)
+	log.Printf("[ServeHTTP] DELETE key=%s", key)
 
 	// 调用 group.Delete 方法，内部会通过一致性哈希判断应该路由到哪个节点
 	err := group.Delete(key)
 	if err != nil {
-		log.Printf("[ServeHTTP] Failed to delete key %s: %v", key, err)
+		log.Printf("[ServeHTTP] Failed to delete key=%s: %v", key, err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	log.Printf("[ServeHTTP] Successfully deleted key: %s", key)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -388,28 +383,21 @@ func (h *httpPeerClient) Get(in *pb.Request, out *pb.Response) error {
 			time.Sleep(backoff)
 		}
 
-		log.Printf("[httpPeerClient] Making request to: %s (attempt %d)", u, attempt+1)
-
 		req, err := http.NewRequest("GET", u, nil)
 		if err != nil {
 			lastErr = err
-			log.Printf("[httpPeerClient] Failed to create request: %v", err)
 			continue
 		}
 
 		res, err := h.httpClient.Do(req)
 		if err != nil {
 			lastErr = err
-			log.Printf("[httpPeerClient] Request failed: %v", err)
 			continue
 		}
-
-		log.Printf("[httpPeerClient] Response status: %s", res.Status)
 
 		if res.StatusCode == http.StatusNotFound {
 			// 404表示key不存在，这是正常响应，不应该算作失败
 			res.Body.Close()
-			log.Printf("[httpPeerClient] Key not found: %s", in.GetKey())
 			// 记录成功（404也是成功的响应）
 			if h.pool != nil {
 				nodeAddr := strings.TrimSuffix(h.baseURL, h.pool.basePath)
@@ -421,7 +409,6 @@ func (h *httpPeerClient) Get(in *pb.Request, out *pb.Response) error {
 		if res.StatusCode != http.StatusOK {
 			res.Body.Close()
 			lastErr = fmt.Errorf("server returned: %v", res.Status)
-			log.Printf("[httpPeerClient] Server error: %v", lastErr)
 			continue
 		}
 
@@ -429,17 +416,13 @@ func (h *httpPeerClient) Get(in *pb.Request, out *pb.Response) error {
 		res.Body.Close()
 		if err != nil {
 			lastErr = fmt.Errorf("reading response body: %v", err)
-			log.Printf("[httpPeerClient] Failed to read response: %v", lastErr)
 			continue
 		}
 
 		if err = proto.Unmarshal(bytes, out); err != nil {
 			lastErr = fmt.Errorf("decoding response body: %v", err)
-			log.Printf("[httpPeerClient] Failed to decode response: %v", lastErr)
 			continue
 		}
-
-		log.Printf("[httpPeerClient] Successfully got value for key: %s", in.GetKey())
 
 		// 记录成功
 		if h.pool != nil {
@@ -486,8 +469,6 @@ func (h *httpPeerClient) Set(in *pb.Request) error {
 			continue
 		}
 
-		log.Printf("[httpPeerClient] Making SET request to: %s (attempt %d)", u, attempt+1)
-
 		req, err := http.NewRequest("PUT", u, bytes.NewReader(body))
 		if err != nil {
 			lastErr = fmt.Errorf("creating request: %v", err)
@@ -501,8 +482,6 @@ func (h *httpPeerClient) Set(in *pb.Request) error {
 			continue
 		}
 
-		log.Printf("[httpPeerClient] SET response status: %s", res.Status)
-
 		if res.StatusCode != http.StatusOK {
 			res.Body.Close()
 			lastErr = fmt.Errorf("server returned: %v", res.Status)
@@ -510,7 +489,6 @@ func (h *httpPeerClient) Set(in *pb.Request) error {
 		}
 
 		res.Body.Close()
-		log.Printf("[httpPeerClient] Successfully set value for key: %s", in.GetKey())
 
 		// 记录成功
 		if h.pool != nil {
@@ -549,8 +527,6 @@ func (h *httpPeerClient) Delete(in *pb.Request) error {
 			time.Sleep(backoff)
 		}
 
-		log.Printf("[httpPeerClient] Making DELETE request to: %s (attempt %d)", u, attempt+1)
-
 		req, err := http.NewRequest("DELETE", u, nil)
 		if err != nil {
 			lastErr = fmt.Errorf("creating request: %v", err)
@@ -563,8 +539,6 @@ func (h *httpPeerClient) Delete(in *pb.Request) error {
 			continue
 		}
 
-		log.Printf("[httpPeerClient] DELETE response status: %s", res.Status)
-
 		if res.StatusCode != http.StatusOK {
 			res.Body.Close()
 			lastErr = fmt.Errorf("server returned: %v", res.Status)
@@ -572,7 +546,6 @@ func (h *httpPeerClient) Delete(in *pb.Request) error {
 		}
 
 		res.Body.Close()
-		log.Printf("[httpPeerClient] Successfully deleted key: %s", in.GetKey())
 
 		// 记录成功
 		if h.pool != nil {
@@ -700,9 +673,7 @@ func (p *HTTPPool) handleNodeChange(nodes []discovery.NodeInfo) {
 		return
 	}
 
-	log.Printf("[HTTPPool] Node list changed, updating. Current: %v, New: %v",
-		currentAddrs, activeAddrs)
-	log.Printf("[HTTPPool] Self node: %s", p.self)
+	log.Printf("[HTTPPool] Node list changed: %d -> %d nodes", len(currentAddrs), len(activeAddrs))
 
 	// 保存旧的哈希环用于迁移
 	oldPeers := p.peers
@@ -711,7 +682,7 @@ func (p *HTTPPool) handleNodeChange(nodes []discovery.NodeInfo) {
 	p.peers = consistenthash.New(defaultReplicas, p.hashFunc)
 	if len(activeAddrs) > 0 {
 		p.peers.Add(activeAddrs...)
-		log.Printf("[HTTPPool] Updated hash ring with nodes: %v", activeAddrs)
+		log.Printf("[HTTPPool] Updated hash ring: %v", activeAddrs)
 	}
 
 	p.httpPeerClients = make(map[string]*httpPeerClient, len(activeAddrs))
@@ -720,8 +691,6 @@ func (p *HTTPPool) handleNodeChange(nodes []discovery.NodeInfo) {
 		client := newHTTPPeerClient(peer+p.basePath, p.requestTimeout, p.maxRetries)
 		client.pool = p // 设置pool引用以便记录节点健康状态
 		p.httpPeerClients[peer] = client
-		log.Printf("[HTTPPool] Created HTTP getter for peer: %s (timeout: %v, retries: %d)",
-			peer, p.requestTimeout, p.maxRetries)
 	}
 
 	// 触发数据迁移，清理不再属于当前节点的数据
@@ -792,7 +761,7 @@ func (p *HTTPPool) triggerMigration(oldPeers, newPeers *consistenthash.Map) {
 // cleanupStaleData 清理不再属于当前节点的数据
 // 采用"先迁移，后清理"的策略，避免缓存雪崩
 func (p *HTTPPool) cleanupStaleData(oldPeers, newPeers *consistenthash.Map) {
-	log.Printf("[HTTPPool] Starting migration and cleanup of stale data")
+	log.Printf("[HTTPPool] Starting data migration and cleanup")
 
 	if p.localGroup == nil {
 		log.Printf("[HTTPPool] No local group, skipping cleanup")
@@ -820,7 +789,7 @@ func (p *HTTPPool) cleanupStaleData(oldPeers, newPeers *consistenthash.Map) {
 		return
 	}
 
-	log.Printf("[HTTPPool] Found %d keys that need migration", len(keysToMigrate))
+	log.Printf("[HTTPPool] Found %d keys to migrate", len(keysToMigrate))
 
 	// 第二步：将数据迁移到目标节点
 	migratedCount := 0
@@ -830,7 +799,7 @@ func (p *HTTPPool) cleanupStaleData(oldPeers, newPeers *consistenthash.Map) {
 		// 直接从本地缓存获取数据，避免触发路由
 		view, ok := p.localGroup.mainCache.get(key)
 		if !ok {
-			log.Printf("[HTTPPool] Failed to get key %s from local cache (not found)", key)
+			log.Printf("[HTTPPool] Key %s not found in local cache", key)
 			failedCount++
 			continue
 		}
@@ -848,8 +817,7 @@ func (p *HTTPPool) cleanupStaleData(oldPeers, newPeers *consistenthash.Map) {
 		p.mu.Unlock()
 
 		if !exists {
-			log.Printf("[HTTPPool] No HTTP client found for target node %s, skipping migration of key %s",
-				targetNode, key)
+			log.Printf("[HTTPPool] No client for node %s, skipping key %s", targetNode, key)
 			failedCount++
 			continue
 		}
@@ -861,11 +829,10 @@ func (p *HTTPPool) cleanupStaleData(oldPeers, newPeers *consistenthash.Map) {
 			continue
 		}
 
-		log.Printf("[HTTPPool] Successfully migrated key %s to %s", key, targetNode)
 		migratedCount++
 	}
 
-	log.Printf("[HTTPPool] Migration completed: %d succeeded, %d failed", migratedCount, failedCount)
+	log.Printf("[HTTPPool] Migration: %d succeeded, %d failed", migratedCount, failedCount)
 
 	// 第三步：延迟清理已迁移的数据
 	// 只清理成功迁移的数据，失败的保留以避免数据丢失
@@ -877,15 +844,14 @@ func (p *HTTPPool) cleanupStaleData(oldPeers, newPeers *consistenthash.Map) {
 			// 再次检查key是否仍需要迁移（防止在迁移期间节点列表再次变化）
 			currentTarget := newPeers.Get(key)
 			if currentTarget != "" && currentTarget != p.self && currentTarget == targetNode {
-				log.Printf("[HTTPPool] Removing migrated key %s (now on %s)", key, targetNode)
 				p.localGroup.Remove(key)
 				cleanedCount++
 			}
 		}
 
-		log.Printf("[HTTPPool] Cleanup completed, removed %d migrated keys", cleanedCount)
+		log.Printf("[HTTPPool] Cleanup: removed %d migrated keys", cleanedCount)
 	} else {
-		log.Printf("[HTTPPool] No successful migrations, skipping cleanup to avoid data loss")
+		log.Printf("[HTTPPool] No successful migrations, skipping cleanup")
 	}
 }
 

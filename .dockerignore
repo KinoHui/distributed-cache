@@ -1,41 +1,6 @@
-# Git
 .git
 .gitignore
-
-# 文档
-*.md
-!README.md
-
-# 测试
-test/
-*_test.go
-
-# 临时文件
-*.tmp
+README.md
+Dockerfile
+docker-compose.yml
 *.log
-*.exe
-*.dll
-*.so
-*.dylib
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# 操作系统
-.DS_Store
-Thumbs.db
-
-# 构建产物
-bin/
-dist/
-build/
-
-# 其他
-jincache
-jincache.exe
-todo.md
-conversation-*.txt

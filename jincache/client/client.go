@@ -359,45 +359,80 @@ type StatsResponse struct {
 	BytesUsed int64 `json:"bytes_used"`
 }
 
-// GetStats 获取缓存统计信息
+// GetStats 获取缓存统计信息（聚合所有节点的统计信息）
 func (c *Client) GetStats(group string) (*StatsResponse, error) {
-	// 第一次尝试
-	node, err := c.selectNode()
-	if err != nil {
-		return nil, err
-	}
-
-	stats, err := c.doGetStats(node, group)
-	if err == nil {
-		return stats, nil
-	}
-
-	log.Printf("[Client] First attempt failed: %v, retrying with next node", err)
-
-	// 第二次尝试：重试下一个节点
-	node, err = c.selectNode()
-	if err != nil {
-		return nil, err
-	}
-
-	stats, err = c.doGetStats(node, group)
-	if err == nil {
-		return stats, nil
-	}
-
-	log.Printf("[Client] Second attempt failed: %v, refreshing node list and retrying", err)
-
-	// 第三次尝试：刷新节点列表后再次请求
+	// 刷新节点列表，确保获取最新的节点
 	if err := c.refreshNodes(); err != nil {
 		return nil, fmt.Errorf("failed to refresh nodes: %v", err)
 	}
 
-	node, err = c.selectNode()
-	if err != nil {
-		return nil, err
+	c.mu.RLock()
+	nodes := make([]string, len(c.nodes))
+	copy(nodes, c.nodes)
+	c.mu.RUnlock()
+
+	if len(nodes) == 0 {
+		return nil, fmt.Errorf("no available nodes for group %s", group)
 	}
 
-	return c.doGetStats(node, group)
+	log.Printf("[Client] Getting stats from %d nodes for group %s", len(nodes), group)
+
+	// 并发获取所有节点的统计信息
+	type nodeStats struct {
+		node  string
+		stats *StatsResponse
+		err   error
+	}
+
+	statsCh := make(chan nodeStats, len(nodes))
+	var wg sync.WaitGroup
+
+	// 为每个节点启动一个 goroutine 获取统计信息
+	for _, node := range nodes {
+		wg.Add(1)
+		go func(nodeAddr string) {
+			defer wg.Done()
+			stats, err := c.doGetStats(nodeAddr, group)
+			statsCh <- nodeStats{node: nodeAddr, stats: stats, err: err}
+		}(node)
+	}
+
+	// 等待所有请求完成
+	go func() {
+		wg.Wait()
+		close(statsCh)
+	}()
+
+	// 聚合统计信息
+	var totalKeysCount int
+	var totalBytesUsed int64
+	var successCount int
+	var failedNodes []string
+
+	for ns := range statsCh {
+		if ns.err != nil {
+			log.Printf("[Client] Failed to get stats from node %s: %v", ns.node, ns.err)
+			failedNodes = append(failedNodes, ns.node)
+			continue
+		}
+		totalKeysCount += ns.stats.KeysCount
+		totalBytesUsed += ns.stats.BytesUsed
+		successCount++
+		log.Printf("[Client] Got stats from node %s: keys=%d, bytes=%d",
+			ns.node, ns.stats.KeysCount, ns.stats.BytesUsed)
+	}
+
+	log.Printf("[Client] Stats aggregation completed: %d nodes succeeded, %d nodes failed",
+		successCount, len(failedNodes))
+
+	if successCount == 0 {
+		return nil, fmt.Errorf("failed to get stats from any node, failed nodes: %v", failedNodes)
+	}
+
+	return &StatsResponse{
+		KeysCount: totalKeysCount,
+		BytesUsed: totalBytesUsed,
+	}, nil
 }
 
 // doGetStats 执行实际的 GetStats 请求

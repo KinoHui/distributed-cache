@@ -1,4 +1,4 @@
-module distributed-cache-demo
+module github.com/KinoHui/distributed-cache
 
 go 1.23.1
 

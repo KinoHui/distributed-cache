@@ -1,8 +1,9 @@
 package jincache
 
 import (
-	"distributed-cache-demo/lru"
 	"sync"
+
+	"github.com/KinoHui/distributed-cache/lru"
 )
 
 // 并发控制的cache

@@ -1,9 +1,10 @@
 package test
 
 import (
-	"distributed-cache-demo/jincache/consistenthash"
 	"strconv"
 	"testing"
+
+	"github.com/KinoHui/distributed-cache/jincache/consistenthash"
 )
 
 func TestHashing(t *testing.T) {

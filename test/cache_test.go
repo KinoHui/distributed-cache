@@ -1,10 +1,11 @@
 package test
 
 import (
-	"distributed-cache-demo/jincache"
 	"fmt"
 	"log"
 	"testing"
+
+	"github.com/KinoHui/distributed-cache/jincache"
 )
 
 var db = map[string]string{

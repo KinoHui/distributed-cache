@@ -3,8 +3,6 @@ package client
 import (
 	"bytes"
 	"context"
-	"distributed-cache-demo/jincache/discovery"
-	"distributed-cache-demo/jincache/jincachepb"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +11,9 @@ import (
 	"net/url"
 	"sync"
 	"time"
+
+	"github.com/KinoHui/distributed-cache/jincache/discovery"
+	"github.com/KinoHui/distributed-cache/jincache/jincachepb"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/protobuf/proto"

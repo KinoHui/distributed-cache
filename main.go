@@ -1,9 +1,6 @@
 package main
 
 import (
-	"distributed-cache-demo/jincache"
-	"distributed-cache-demo/jincache/client"
-	"distributed-cache-demo/jincache/discovery"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -15,6 +12,10 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/KinoHui/distributed-cache/jincache"
+	"github.com/KinoHui/distributed-cache/jincache/client"
+	"github.com/KinoHui/distributed-cache/jincache/discovery"
 
 	"gopkg.in/yaml.v3"
 )
@@ -49,17 +50,17 @@ type Config struct {
 
 	// 缓存配置
 	GroupName    string `yaml:"group_name" json:"group_name"`
-	CacheBytes   int64  `yaml:"cache_bytes" json:"cache_bytes"`   // 缓存大小（字节）
+	CacheBytes   int64  `yaml:"cache_bytes" json:"cache_bytes"` // 缓存大小（字节）
 	EnableGetter bool   `yaml:"enable_getter" json:"enable_getter"`
 
 	// etcd 配置
-	EtcdEndpoints []string `yaml:"etcd_endpoints" json:"etcd_endpoints"`
-	EtcdDialTimeout int    `yaml:"etcd_dial_timeout" json:"etcd_dial_timeout"` // etcd 连接超时（秒）
+	EtcdEndpoints   []string `yaml:"etcd_endpoints" json:"etcd_endpoints"`
+	EtcdDialTimeout int      `yaml:"etcd_dial_timeout" json:"etcd_dial_timeout"` // etcd 连接超时（秒）
 
 	// 服务发现配置
-	NodeID          string `yaml:"node_id" json:"node_id"`                   // 节点ID（留空自动生成）
-	LeaseTTL        int    `yaml:"lease_ttl" json:"lease_ttl"`               // 租约TTL（秒）
-	HeartbeatInterval int  `yaml:"heartbeat_interval" json:"heartbeat_interval"` // 心跳间隔（秒）
+	NodeID            string `yaml:"node_id" json:"node_id"`                       // 节点ID（留空自动生成）
+	LeaseTTL          int    `yaml:"lease_ttl" json:"lease_ttl"`                   // 租约TTL（秒）
+	HeartbeatInterval int    `yaml:"heartbeat_interval" json:"heartbeat_interval"` // 心跳间隔（秒）
 
 	// HTTP 客户端配置
 	HTTPTimeout int `yaml:"http_timeout" json:"http_timeout"` // HTTP 请求超时（秒）

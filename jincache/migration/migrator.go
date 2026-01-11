@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	pb "distributed-cache-demo/jincache/jincachepb"
+	pb "github.com/KinoHui/distributed-cache/jincache/jincachepb"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -50,7 +50,7 @@ func (dm *DataMigrator) MigrateData(ctx context.Context, plan MigrationPlan) err
 		return nil
 	}
 
-	log.Printf("[Migration] Starting migration from %s to %s, %d keys", 
+	log.Printf("[Migration] Starting migration from %s to %s, %d keys",
 		plan.SourceNode, plan.TargetNode, len(plan.Keys))
 
 	// 分批迁移
@@ -81,7 +81,7 @@ func (dm *DataMigrator) migrateBatch(ctx context.Context, keys []string, sourceN
 		wg.Add(1)
 		go func(k string) {
 			defer wg.Done()
-			
+
 			if err := dm.migrateKey(ctx, k, sourceNode); err != nil {
 				errCh <- fmt.Errorf("failed to migrate key %s: %v", k, err)
 			}
@@ -174,11 +174,11 @@ func (dm *DataMigrator) GetKeysToMigrate(sourceNode, targetNode string) ([]strin
 	// 实际实现中需要：
 	// 1. 从源节点获取所有keys
 	// 2. 根据一致性哈希算法判断哪些keys需要迁移到目标节点
-	
+
 	testKeys := []string{"key1", "key2", "key3", "key4", "key5"}
-	log.Printf("[Migration] Found %d keys to migrate from %s to %s", 
+	log.Printf("[Migration] Found %d keys to migrate from %s to %s",
 		len(testKeys), sourceNode, targetNode)
-	
+
 	return testKeys, nil
 }
 

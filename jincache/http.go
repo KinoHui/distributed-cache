@@ -3,10 +3,6 @@ package jincache
 import (
 	"bytes"
 	"context"
-	"distributed-cache-demo/jincache/consistenthash"
-	"distributed-cache-demo/jincache/discovery"
-	pb "distributed-cache-demo/jincache/jincachepb"
-	"distributed-cache-demo/jincache/migration"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +12,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/KinoHui/distributed-cache/jincache/consistenthash"
+	"github.com/KinoHui/distributed-cache/jincache/discovery"
+	pb "github.com/KinoHui/distributed-cache/jincache/jincachepb"
+	"github.com/KinoHui/distributed-cache/jincache/migration"
 
 	"google.golang.org/protobuf/proto"
 )
@@ -28,12 +29,12 @@ const (
 // HTTPPool implements PeerPicker for a pool of HTTP peers.
 type HTTPPool struct {
 	// this peer's base URL, e.g. "https://example.net:8000"
-	self        string
-	basePath    string
-	mu          sync.Mutex // guards peers and httpPeerClients
-	peers       *consistenthash.Map
+	self            string
+	basePath        string
+	mu              sync.Mutex // guards peers and httpPeerClients
+	peers           *consistenthash.Map
 	httpPeerClients map[string]*httpPeerClient // keyed by e.g. "http://10.0.0.2:8008"
-	hashFunc    consistenthash.Hash
+	hashFunc        consistenthash.Hash
 
 	// 新增字段
 	discovery  *discovery.ServiceDiscovery
@@ -168,8 +169,8 @@ func NewEnhancedHTTPPool(self string, discovery *discovery.ServiceDiscovery, gro
 		stopCh:     make(chan struct{}),
 		migrator:   migration.NewDataMigrator(&GroupAdapter{group: group}, 100, 30*time.Second),
 		// 初始化空的peers，避免空指针
-		peers:       consistenthash.New(defaultReplicas, hashFunc),
-		hashFunc:    hashFunc,
+		peers:           consistenthash.New(defaultReplicas, hashFunc),
+		hashFunc:        hashFunc,
 		httpPeerClients: make(map[string]*httpPeerClient),
 		// 容错配置
 		nodeHealth:     newNodeHealth(3, 5*time.Minute), // 3次失败后加入黑名单，5分钟后恢复

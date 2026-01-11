@@ -35,3 +35,4 @@ build/
 jincache.exe
 todo.md
 conversation-*.txt
+jincache/jincachepb/jincachepb.pb.go

@@ -1,12 +1,13 @@
 package jincache
 
 import (
-	pb "distributed-cache-demo/jincache/jincachepb"
-	"distributed-cache-demo/jincache/singleflight"
 	errors "errors"
 	"fmt"
 	"log"
 	"sync"
+
+	pb "github.com/KinoHui/distributed-cache/jincache/jincachepb"
+	"github.com/KinoHui/distributed-cache/jincache/singleflight"
 )
 
 // KeyNotFoundError 表示key不存在的错误
@@ -33,7 +34,7 @@ type Group struct {
 	peers     PeerPicker
 	// use singleflight.Group to make sure that
 	// each key is only fetched once
-	loader *singleflight.Group
+	loader       *singleflight.Group
 	enableGetter bool
 }
 
@@ -49,10 +50,10 @@ func NewGroup(name string, cacheBytes int64, getter Getter) *Group {
 
 	enableGetter := getter != nil
 	g := &Group{
-		name: name,
-		getter: getter,
-		mainCache: cache{cacheBytes: cacheBytes},
-		loader: &singleflight.Group{},
+		name:         name,
+		getter:       getter,
+		mainCache:    cache{cacheBytes: cacheBytes},
+		loader:       &singleflight.Group{},
 		enableGetter: enableGetter,
 	}
 

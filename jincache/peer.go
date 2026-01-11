@@ -1,6 +1,6 @@
 package jincache
 
-import pb "distributed-cache-demo/jincache/jincachepb"
+import pb "github.com/KinoHui/distributed-cache/jincache/jincachepb"
 
 // PeerPicker is the interface that must be implemented to locate
 // the peer that owns a specific key.

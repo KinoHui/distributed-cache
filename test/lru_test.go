@@ -1,9 +1,10 @@
 package test
 
 import (
-	"distributed-cache-demo/lru"
 	"reflect"
 	"testing"
+
+	"github.com/KinoHui/distributed-cache/lru"
 )
 
 type String string
